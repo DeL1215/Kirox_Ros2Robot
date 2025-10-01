@@ -184,10 +184,29 @@ class AsyncWSClient:
         self.pub_action = self.node.create_publisher(RosString, "body/action", 10)
         self.pub_face = self.node.create_publisher(RosString, "face/animation", 10)
 
-
-    @property
-    def is_connected(self) -> bool:
-        return (self._ws is not None) and (not self._ws.closed)
+    # ---- 關鍵修復：相容性安全的連線狀態檢查 ----
+    def _ws_is_open(self) -> bool:
+        ws = self._ws
+        if ws is None:
+            return False
+        # 優先嘗試常見屬性
+        val = getattr(ws, "closed", None)
+        if callable(val):
+            try:
+                val = val()
+            except Exception:
+                val = None
+        if isinstance(val, bool):
+            return not val
+        cc = getattr(ws, "close_code", None)
+        if cc is not None:
+            return cc is None
+        state = getattr(ws, "state", None)
+        name = getattr(state, "name", None)
+        if name:
+            return name.upper() in ("OPEN",)
+        # 不確定就假定開著，交給 send() 自己拋錯
+        return True
 
     async def connect_forever(self):
         backoff = 1.0
@@ -321,7 +340,6 @@ class AsyncWSClient:
                     self.node.get_logger().info(f"[assistant action] {action_payload}")
                 continue
 
-
             # 一回合結束
             if d.get("done") is True:
                 if callable(self.on_play_end):
@@ -341,9 +359,6 @@ class AsyncWSClient:
                         pass
                 continue
 
-            # 其他訊息（如 pong/info）視需要處理
-            # self.node.get_logger().debug(f"[server] {d}")
-
     async def send_round(self, image_b64: Optional[str], wav_bytes: bytes) -> bool:
         """
         傳送一回合：
@@ -352,7 +367,8 @@ class AsyncWSClient:
           3) {"end": true}
         成功則回 True，否則 False。
         """
-        if self._ws is None or self._ws.closed:
+        # ---- 關鍵修復：不再取用 self._ws.closed，改用相容檢查 ----
+        if not self._ws_is_open():
             self.node.get_logger().warn("WS 尚未連線，略過本回合")
             return False
 

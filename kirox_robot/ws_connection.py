@@ -223,26 +223,20 @@ class WSConnectionNode(Node):
             return
         self._last_audio_sig = audio_sig
 
-        # 丟到 asyncio 事件圈
-        fut = asyncio.run_coroutine_threadsafe(
-            self._client.send_round(image_b64, wav_bytes),
-            self._loop
+        # 在背景執行緒中，同步等待 asyncio coroutine 完成
+        future = asyncio.run_coroutine_threadsafe(
+            self._client.send_round(image_b64, wav_bytes), self._loop
         )
-
-        def _after_send(f):
-            ok = False
-            try:
-                ok = bool(f.result())
-            except Exception:
-                ok = False
+        
+        try:
+            # 等待結果
+            ok = future.result(timeout=15)  # 設置15秒超時
             if not ok:
-                # 送不出去（未連線或例外）→ 立刻復原
-                self.get_logger().warn("send_round 未成功，恢復錄音/解鎖")
-                self._busy = False
-                self.rec_enable_pub.publish(Bool(data=True))
-                self.speaking_pub.publish(Bool(data=False))
-
-        fut.add_done_callback(lambda f: _after_send(f))
+                self.get_logger().warn("send_round 回傳 False，恢復錄音/解鎖")
+                self._reset_state_after_failure()
+        except Exception as e:
+            self.get_logger().error(f"send_round 執行失敗: {e}，恢復錄音/解鎖")
+            self._reset_state_after_failure()
 
     def _read_latest_wav_and_sig(self) -> Tuple[Optional[bytes], Optional[str]]:
         meta = self.latest_audio_meta or {}
@@ -259,6 +253,12 @@ class WSConnectionNode(Node):
             return None, None
         sig = f"{ts}:{sha}:{path}"
         return data, sig
+
+    def _reset_state_after_failure(self):
+        """通訊失敗後重置狀態"""
+        self._busy = False
+        self.rec_enable_pub.publish(Bool(data=True))
+        self.speaking_pub.publish(Bool(data=False))
 
     # ---------- lifecycle ----------
     def destroy_node(self):

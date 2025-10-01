@@ -30,6 +30,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32
+from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import String as StringMsg
 from openwakeword.model import Model
 
@@ -39,7 +40,9 @@ class WakeWordTriggerNode(Node):
         super().__init__('wakeword_trigger_node')
 
         # 參數
-        self.declare_parameter('model_path', '/home/del1215/ros2_ws/src/kirox_robot/kirox_robot/models/kirox.onnx')
+        package_share_dir = get_package_share_directory('kirox_robot')
+        default_model_path = os.path.join(package_share_dir, 'models', 'kirox.onnx')
+        self.declare_parameter('model_path', default_model_path)
         self.declare_parameter('device_name', 'pulse')
         self.declare_parameter('rate', 16000)
         self.declare_parameter('frame_ms', 80)

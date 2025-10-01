@@ -236,7 +236,7 @@ class RobotEyesNode(Node):
         # 4) q、q_bar
         w_gaze = _w_gaze(p_front)
         w_dist = _w_dist(dist_m if np.isfinite(dist_m) else 1e6)
-        q = w_gaze * w_dist * confidence
+        q = w_gaze * w_dist  # 移除信心分數乘數
         self.q_bar = EMA_LAMBDA * self.q_bar + (1.0 - EMA_LAMBDA) * q
 
         # 5) 發佈/疊圖/視窗

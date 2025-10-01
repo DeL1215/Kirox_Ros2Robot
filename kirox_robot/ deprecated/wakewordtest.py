@@ -11,10 +11,12 @@ import os
 import time
 import numpy as np
 import sounddevice as sd
+from ament_index_python.packages import get_package_share_directory
 from openwakeword.model import Model
 
 # ===== 參數 =====
-MODEL_PATH = "/home/del1215/ros2_ws/src/kirox_robot/kirox_robot/models/kirox.onnx"
+package_share_dir = get_package_share_directory('kirox_robot')
+MODEL_PATH = os.path.join(package_share_dir, 'models', 'kirox.onnx')
 DEVICE = "default"      # 或改成 13 -> pulse
 RATE = 16000
 FRAME_MS = 80

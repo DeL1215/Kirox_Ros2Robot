@@ -1,7 +1,10 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
+from ament_index_python.packages import get_package_share_directory
+
 
 # --- 模型定義 ---
 class LogisticRegression(nn.Module):
@@ -15,8 +18,11 @@ class LogisticRegression(nn.Module):
         x = self.sigmoid(x)  # 輸出機率
         return x
 
+# --- 取得套件路徑 ---
+package_share_dir = get_package_share_directory('kirox_robot')
+
 # --- 讀取 CSV ---
-df = pd.read_csv("/home/del1215/ros2_ws/src/kirox_robot/kirox_robot/logreg/tri_scores.csv")  # 這裡放你的 CSV 檔案名稱
+df = pd.read_csv(os.path.join(package_share_dir, "logreg", "tri_scores.csv"))
 
 # 特徵欄位對應
 X = torch.tensor(df[["vision_score", "vad_score", "oww_score"]].values, dtype=torch.float32)
@@ -38,12 +44,13 @@ for epoch in range(10000):
         print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
 
 # --- 保存模型 ---
-torch.save(model.state_dict(), "logreg_model.pth")
-print("✅ 模型已保存 -> logreg_model.pth")
+model_save_path = os.path.join(package_share_dir, "models", "logreg_model.pth")
+torch.save(model.state_dict(), model_save_path)
+print(f"✅ 模型已保存 -> {model_save_path}")
 
 # --- 載入模型 ---
 loaded_model = LogisticRegression()
-loaded_model.load_state_dict(torch.load("logreg_model.pth"))
+loaded_model.load_state_dict(torch.load(model_save_path))
 loaded_model.eval()
 print("✅ 模型已載入")
 

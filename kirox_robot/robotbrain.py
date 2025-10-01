@@ -8,6 +8,7 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from ament_index_python.packages import get_package_share_directory
 
 from std_msgs.msg import String, Float32, Bool
 from kirox_robot.logreg.train import LogisticRegression
@@ -31,11 +32,12 @@ class RobotBrainNode(Node):
     def __init__(self):
         super().__init__('robot_brain_node')
 
+        # 取得套件分享目錄，以建立模型檔案的絕對路徑
+        package_share_dir = get_package_share_directory('kirox_robot')
+        default_model_path = os.path.join(package_share_dir, 'models', 'logreg_model.pth')
+
         # 參數
-        self.declare_parameter(
-            'model_path',
-            '/home/del1215/ros2_ws/src/kirox_robot/kirox_robot/models/logreg_model.pth'
-        )
+        self.declare_parameter('model_path', default_model_path)
         self.declare_parameter('threshold', 0.5)
 
         self.model_path: str = self.get_parameter('model_path').get_parameter_value().string_value
