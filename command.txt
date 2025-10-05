@@ -35,3 +35,13 @@ ps -eo pid,user,comm,%mem,%cpu,etime --sort=-%mem | head -n 25
 
 # 互動監看
 top            # or 安裝 htop：sudo apt install htop && htop
+
+
+| 動作       | 指令                                       |
+| -------- | ---------------------------------------- |
+| 停止 Kirox | `systemctl --user stop kirox.service`    |
+| 啟動 Kirox | `systemctl --user start kirox.service`   |
+| 開機自動啟動   | `systemctl --user enable kirox.service`  |
+| 暫時停用自動啟動 | `systemctl --user disable kirox.service` |
+| 查看狀態     | `systemctl --user status kirox.service`  |
+| 查看日誌     | `journalctl --user -u kirox.service -f`  |
