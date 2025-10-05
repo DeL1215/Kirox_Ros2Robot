@@ -2,15 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Kirox 影像分數節點（SCRFD + 6DRepNet）
-只輸出影像分數：
-- q：單幀品質分數 (0~1)
-- q_bar：EMA 平滑分數 (0~1)
-同時發佈：距離、p_front、yaw_deg、pitch_deg 以便驗證。
-去除：6 秒/加扣分/觸發判斷/服務，確保精簡。
-
-新增：
-- 轉發「純原始影像」到 latched topic（TRANSIENT_LOCAL），支援等比縮放 + JPEG 品質參數
-  topic 由參數 rgb_latest_topic 控制（預設 vision/rgb_latest）
+輸出：
+- q：單幀品質 (0~1)
+- q_bar：EMA 平滑 (0~1)
+同時發佈：距離、p_front、yaw_deg、pitch_deg
+新增：轉發原始影像到 TRANSIENT_LOCAL（等比縮放 + JPEG 品質）
 """
 
 import math
@@ -26,15 +22,14 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import Image, CompressedImage
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool as RosBool
 from cv_bridge import CvBridge
 
-
 # =========================
-# 超參數（可調整的常數）
+# 可調參數
 # =========================
-THETA_FRONT   = 0.60
-K_GAZE        = 8.0
+THETA_FRONT   = 0.40
+K_GAZE        = 5.0
 D0_M          = 1.20
 GAMMA_DIST    = 1.5
 EMA_LAMBDA    = 0.80
@@ -73,7 +68,7 @@ class RobotEyesNode(Node):
     def __init__(self):
         super().__init__("robot_eyes_node")
 
-        # ---- 基本參數 ----
+        # ---- 參數 ----
         self.declare_parameter("rgb_topic", "/camera/color/image_raw")
         self.declare_parameter("depth_topic", "")
         self.declare_parameter("use_gpu", True)
@@ -81,10 +76,9 @@ class RobotEyesNode(Node):
         self.declare_parameter("ctx_id", 0)
         self.declare_parameter("pose_device", "cuda:0")
 
-        # 轉發 topic 與輸出畫質控制（等比縮放 + JPEG 品質）
         self.declare_parameter("rgb_latest_topic", "vision/rgb_latest")
-        self.declare_parameter("rgb_latest_scale", 0.3)          # 等比倍率（>0），例：0.5 縮小一半，2.0 放大兩倍
-        self.declare_parameter("rgb_latest_jpeg_quality", 90)     # 1~100，越大越清晰
+        self.declare_parameter("rgb_latest_scale", 0.3)
+        self.declare_parameter("rgb_latest_jpeg_quality", 90)
 
         self.rgb_topic        = self.get_parameter("rgb_topic").value
         self.depth_topic      = self.get_parameter("depth_topic").value
@@ -97,11 +91,10 @@ class RobotEyesNode(Node):
         self.scale            = float(self.get_parameter("rgb_latest_scale").value)
         self.jpeg_q           = int(self.get_parameter("rgb_latest_jpeg_quality").value)
 
-        # 合理限制
         self.scale  = max(0.05, min(4.0, self.scale))
         self.jpeg_q = int(np.clip(self.jpeg_q, 1, 100))
 
-        # ---- 載入臉偵測（InsightFace / SCRFD）----
+        # ---- InsightFace / SCRFD ----
         try:
             from insightface.app import FaceAnalysis
             providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
@@ -111,8 +104,17 @@ class RobotEyesNode(Node):
         except Exception as e:
             raise RuntimeError(f"載入 InsightFace 失敗：{e}")
 
-        # ---- 載入頭姿（SixDRepNet）----
+        # ---- SixDRepNet（先解 utils 汙染）----
+        import sys, importlib.util
+        spec = importlib.util.find_spec("sixdrepnet")
+        if spec and spec.submodule_search_locations:
+            sixd_dir = list(spec.submodule_search_locations)[0]
+            if sixd_dir not in sys.path:
+                sys.path.insert(0, sixd_dir)
         from sixdrepnet import SixDRepNet
+        import sixdrepnet.utils as su
+        sys.modules['utils'] = su  # 固定 utils 指向 sixdrepnet.utils
+
         import torch
         self.pose_model = SixDRepNet()
         if torch.cuda.is_available():
@@ -134,8 +136,6 @@ class RobotEyesNode(Node):
         self.pub_pfront   = self.create_publisher(Float32, "vision/p_front", latched)
         self.pub_yaw      = self.create_publisher(Float32, "vision/yaw_deg", latched)
         self.pub_pitch    = self.create_publisher(Float32, "vision/pitch_deg", latched)
-
-        # 轉發純影像（壓縮後）
         self.pub_rgb_latest = self.create_publisher(CompressedImage, self.rgb_latest_topic, latched)
 
         self.bridge = CvBridge()
@@ -155,13 +155,19 @@ class RobotEyesNode(Node):
         self._fps = 0.0
         self._fps_n = 0
         self._last_fps_t = rclpy.clock.Clock().now().nanoseconds / 1e9
-
-        # 解析度變動時才列印，避免洗版
         self._last_print_wh: Optional[Tuple[int, int]] = None
+        self.is_setting_mode = False
+
+        # 訂閱設定模式狀態
+        self.create_subscription(RosBool, "system/setting_mode", self._on_setting_mode, 10)
 
         self.get_logger().info("RobotEyesNode ready (SCRFD + 6DRepNet).")
 
     # ----------------- 訂閱回呼 -----------------
+    def _on_setting_mode(self, msg: RosBool):
+        self.is_setting_mode = msg.data
+        self.get_logger().info(f"Setting mode changed to: {self.is_setting_mode}")
+
     def on_depth(self, msg: Image):
         try:
             self.depth_latest = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
@@ -169,14 +175,18 @@ class RobotEyesNode(Node):
             self.get_logger().warn(f"depth convert error: {e}")
 
     def on_rgb(self, msg: Image):
-        # 取出影像 (BGR)
+        # 如果在設定模式，則中斷所有工作
+        if self.is_setting_mode:
+            # self.get_logger().info("In setting mode, skipping vision processing.", throttle_duration_sec=5)
+            return
+
         try:
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:
             self.get_logger().warn(f"rgb convert error: {e}")
             return
 
-        # 等比縮放（給 rgb_latest 用；偵測仍用原圖 bgr）
+        # 等比縮放（只用於轉發；偵測仍用原圖）
         h0, w0 = bgr.shape[:2]
         if abs(self.scale - 1.0) < 1e-6:
             resized = bgr
@@ -186,7 +196,7 @@ class RobotEyesNode(Node):
             new_h = max(1, int(round(h0 * self.scale)))
             resized = cv2.resize(bgr, (new_w, new_h), interpolation=interp)
 
-        # 列印目前輸出解析度（僅在變動時）
+        # 解析度變動才列印
         wh = (resized.shape[1], resized.shape[0])
         if wh != self._last_print_wh:
             self._last_print_wh = wh
@@ -206,7 +216,7 @@ class RobotEyesNode(Node):
         except Exception as e:
             self.get_logger().warn(f"publish rgb_latest failed: {e}")
 
-        # 1) 臉偵測（取最大框）— 使用原圖 bgr（不影響既有行為）
+        # 1) 臉偵測（取最大框）
         faces = []
         try:
             faces = self.face_app.get(bgr)
@@ -236,7 +246,7 @@ class RobotEyesNode(Node):
         # 4) q、q_bar
         w_gaze = _w_gaze(p_front)
         w_dist = _w_dist(dist_m if np.isfinite(dist_m) else 1e6)
-        q = w_gaze * w_dist  # 移除信心分數乘數
+        q = w_gaze * w_dist * confidence
         self.q_bar = EMA_LAMBDA * self.q_bar + (1.0 - EMA_LAMBDA) * q
 
         # 5) 發佈/疊圖/視窗
@@ -293,7 +303,6 @@ class RobotEyesNode(Node):
             self._fps = self._fps_n / (now - self._last_fps_t)
             self._fps_n = 0
             self._last_fps_t = now
-
         cv2.imshow(WINDOW_NAME, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -306,7 +315,7 @@ class RobotEyesNode(Node):
         x, y, w, h = bbox
         roi = bgr[max(0, y):y + h, max(0, x):x + w]
         if roi.size == 0:
-            return 0.0, None, None
+            return 0.6, None, None  # 中性值，避免 w_gaze 歸零
         try:
             roi_resized = cv2.resize(roi, (224, 224))
             pitch_deg, yaw_deg, _ = self.pose_model.predict(roi_resized)
@@ -317,7 +326,7 @@ class RobotEyesNode(Node):
             p_front = float(max(0.0, min(1.0, 0.5 * (yaw_score + pitch_score))))
             return p_front, float(yaw_deg), float(pitch_deg)
         except Exception:
-            return 0.0, None, None
+            return 0.6, None, None  # 中性值
 
     def _estimate_distance(self, bbox: Tuple[int, int, int, int]) -> float:
         x, y, w, h = bbox

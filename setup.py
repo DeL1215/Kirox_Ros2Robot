@@ -29,7 +29,7 @@ setup(
             'robotears = kirox_robot.robotears:main',
             'robotbody = kirox_robot.robotbody:main',
             'wsconnection = kirox_robot.ws_connection:main',
-            'trainingnode = kirox_robot.training:main',
+            # 'trainingnode = kirox_robot.training:main',
             'camera = kirox_robot.kirox_camera:main',
         ],
     },

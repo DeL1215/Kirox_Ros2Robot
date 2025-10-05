@@ -143,9 +143,6 @@ class AsyncWSClient:
         on_connected() / on_disconnected()
         on_play_start() / on_play_end()
         on_text(str) / on_action(Any)
-    - 額外：收到文字/動作時，會發佈：
-        * brain/text   (std_msgs/String)
-        * brain/action (std_msgs/String, 若為 dict/list 會 JSON 序列化)
     """
     def __init__(
         self,

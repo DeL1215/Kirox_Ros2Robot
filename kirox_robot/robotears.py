@@ -100,7 +100,7 @@ class RobotEarsNode(Node):
         self.declare_parameter("t_cap_s", 3.0)     # cont 飽和秒數
         self.declare_parameter("p_min", 0.30)      # 語音機率門檻
         self.declare_parameter("snr_min_db", 3.0)  # 低 SNR 溫和懲罰門檻
-        self.declare_parameter("rms_gate", 10)     # 超低音量 gate
+        self.declare_parameter("rms_gate", 6)     # 超低音量 gate
         self.declare_parameter("target_proc_rate", 16000)
         # 權重（提高語音機率權重）
         self.declare_parameter("w_p", 0.60)
@@ -166,6 +166,9 @@ class RobotEarsNode(Node):
         self.pub_oww    = self.create_publisher(Float32, "ears/oww_score", latched_qos)
 
         self._record_enable = True
+        self.is_setting_mode = False
+        # 訂閱設定模式
+        self.create_subscription(Bool, "system/setting_mode", self._on_setting_mode, 10)
         self.create_subscription(Bool, "ears/record_enable", self._on_record_enable, latched_qos)
 
         # 背景事件 queue
@@ -220,6 +223,10 @@ class RobotEarsNode(Node):
         self.get_logger().info("[robotears] started")
 
     # ---------- 錄音開關 ----------
+    def _on_setting_mode(self, msg: Bool):
+        self.is_setting_mode = msg.data
+        self.get_logger().info(f"Setting mode changed to: {self.is_setting_mode}")
+
     def _on_record_enable(self, msg: Bool):
         prev = self._record_enable
         self._record_enable = bool(msg.data)
@@ -306,12 +313,13 @@ class RobotEarsNode(Node):
                 ev = self._evq.get(timeout=0.1)
             except queue.Empty:
                 continue
-
+            
             if ev["kind"] != "audio_chunk":
                 self._evq.put(ev)
                 continue
-
-            if not self._record_enable:
+            
+            # 如果不在錄音狀態或在設定模式，則重置所有狀態並跳過
+            if not self._record_enable or self.is_setting_mode:
                 in_speech = False
                 voiced_count = unvoiced_count = 0
                 seg_samples = []

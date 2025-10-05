@@ -8,11 +8,12 @@ import os
 import threading
 import time
 from typing import Optional, Dict, Any, Tuple
+import concurrent.futures as cf  # 用於辨識 TimeoutError 等
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Bool as RosBool
 from sensor_msgs.msg import CompressedImage  # 訂閱壓縮影像（JPEG bytes）
 
 from kirox_robot.robotclient.client_api import create_instance, AsyncWSClient
@@ -30,22 +31,37 @@ class WSConnectionNode(Node):
         self.declare_parameter("keepalive_interval_sec", 20)
         self.declare_parameter("min_round_interval_sec", 1.0)
         self.declare_parameter("auto_enable_rec_after_done", True)
+        self.declare_parameter("round_timeout_sec", 90)  # 單回合上傳 + 等待伺服器回應的本地等待超時
 
+        # ---- 讀取參數 ----
         p = self.get_parameter
         self.botid = p("botid").value
-        cfg = get_robot_config(self.botid)
 
+        # 初始抓取設定
+        cfg = get_robot_config(self.botid)
+        if not cfg:
+            raise RuntimeError("get_robot_config(botid) 失敗，無法啟動 WSConnectionNode")
+
+        # 這些欄位會在 reload 時被覆寫
         self.prompt_style = cfg.promptstyle
         self.tts_voice = cfg.voicename
-        self.tts_lang = "zh"
+        self.tts_lang = getattr(cfg, "language", "zh")
         self.tts_fpb = int(p("tts_frames_per_buffer").value)
+
+        # 伺服器端 API/WS
         self.rest_create_url = "https://agent.xbotworks.com/create_instance"
         self.ws_url = "wss://agent.xbotworks.com/ws"
+
+        # 其他控制
         self.audio_only = bool(p("audio_only").value)
         self.keepalive_sec = int(p("keepalive_interval_sec").value)
         self.min_round_interval = float(p("min_round_interval_sec").value)
         self.auto_enable_rec = bool(p("auto_enable_rec_after_done").value)
-        self.rgb_latest_sub = str("/vision/rgb_latest")
+        self.round_timeout_sec = int(p("round_timeout_sec").value)
+        self.rgb_latest_sub = str("vision/rgb_latest")
+
+        # 保存目前設定，reload 時會被替換
+        self.config_for_reload = cfg
 
         # ---- ROS 介面 ----
         self.latest_img: Optional[CompressedImage] = None
@@ -63,11 +79,15 @@ class WSConnectionNode(Node):
         self.create_subscription(String, "ears/latest_audio_meta", self._on_latest_audio_meta, latched_qos)
         self.create_subscription(Bool, "brain/triggered", self._on_triggered, 10)
 
+        # 設定模式與重載
+        self.create_subscription(RosBool, "system/setting_mode", self._on_setting_mode, 10)
+        self.create_subscription(RosBool, "system/reload_config", self._on_reload_config, 10)
+
         # 錄音開關（latched）
         self.rec_enable_pub = self.create_publisher(Bool, "ears/record_enable", latched_qos)
         self.rec_enable_pub.publish(Bool(data=True))  # 啟動即開啟錄音
 
-        # NEW: 嘴巴動畫布林狀態（即時狀態，用 VOLATILE）
+        # 嘴巴動畫布林狀態（即時，VOLATILE）
         speaking_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -82,11 +102,12 @@ class WSConnectionNode(Node):
         self._last_audio_sig: Optional[str] = None
         self._busy = False
         self._ws_ready = False  # 只有 True 才允許送回合
+        self.is_setting_mode = False
 
-        # 建立/更新 instance（REST）
+        # 先把目前設定同步到伺服器（只在開機與重載時呼叫）
         self._call_create_instance()
 
-        # 啟動 WS 客戶端（獨立事件圈）
+        # ---- 啟動 WS 客戶端（獨立事件圈）----
         self._loop = asyncio.new_event_loop()
         self._client = AsyncWSClient(
             node=self,
@@ -97,6 +118,7 @@ class WSConnectionNode(Node):
                 "TTS_VOICE": self.tts_voice,
                 "TTS_LANG": self.tts_lang,
                 "TTS_FRAMES_PER_BUFFER": self.tts_fpb,
+                "force": True,  # 允許伺服器端搶占舊連線（避免 BOTID_IN_USE）
             },
             keepalive_sec=self.keepalive_sec,
             on_connected=self._on_ws_connected,
@@ -113,11 +135,26 @@ class WSConnectionNode(Node):
 
         self.get_logger().info(
             f"WSConnectionNode ready | audio_only={self.audio_only} | "
-            f"min_round_interval={self.min_round_interval}s | rgb_latest_sub={self.rgb_latest_sub}"
+            f"min_round_interval={self.min_round_interval}s | "
+            f"round_timeout={self.round_timeout_sec}s | rgb_latest_sub={self.rgb_latest_sub}"
         )
+
+    # ---------- 設定套用 ----------
+    def _apply_config(self, cfg) -> None:
+        """將取得的設定套用到本節點狀態（本地欄位 + 後續送 REST 用）"""
+        self.config_for_reload = cfg
+        self.prompt_style = getattr(cfg, "promptstyle", self.prompt_style)
+        self.tts_voice = getattr(cfg, "voicename", self.tts_voice)
+        self.tts_lang = getattr(cfg, "language", self.tts_lang)
+        self.tts_fpb = int(getattr(cfg, "frames_per_buffer", self.tts_fpb))
 
     # ---------- REST ----------
     def _call_create_instance(self):
+        """呼叫 REST API 建立或更新 Agent 實例（單一真相來源：以當前 self.* 為準）"""
+        payload_info = (
+            f"style={self.prompt_style}, voice={self.tts_voice}, lang={self.tts_lang}, fpb={self.tts_fpb}"
+        )
+        self.get_logger().info(f"Calling create_instance... ({payload_info})")
         res = create_instance(
             botid=self.botid,
             prompt_style=self.prompt_style,
@@ -128,7 +165,9 @@ class WSConnectionNode(Node):
             timeout=10,
         )
         if res is None:
-            self.get_logger().warn("create_instance 失敗（稍後重連會重試）")
+            self.get_logger().warn("create_instance 失敗: timeout or network error")
+        elif not (res.get("ok") or res.get("status") == "ok"):
+            self.get_logger().warn(f"create_instance 失敗: {res.get('reason') or res.get('message') or 'unknown server error'}")
         else:
             self.get_logger().info("create_instance 成功")
 
@@ -164,10 +203,38 @@ class WSConnectionNode(Node):
         self._busy = False
 
     # ---------- ROS Callbacks ----------
+    def _on_setting_mode(self, msg: RosBool):
+        self.is_setting_mode = msg.data
+        self.get_logger().info(f"Setting mode changed to: {self.is_setting_mode}")
+
+    def _on_reload_config(self, msg: RosBool):
+        """收到 system/reload_config=True → 重新抓設定 → 套用本地 → 透過 create_instance 同步到伺服器"""
+        if not msg.data:
+            return
+        self.get_logger().info("Received config reload request → 重新抓取設定...")
+
+        try:
+            # 1) 重新抓設定（遠端/本地皆可，由 get_robot_config 決定）
+            new_cfg = get_robot_config(self.botid)
+            if not new_cfg:
+                self.get_logger().warn("reload 失敗：get_robot_config 回傳空結果，保留舊設定")
+                return
+
+            # 2) 套用到本地欄位
+            self._apply_config(new_cfg)
+            self.get_logger().info(
+                f"Reload OK → style={self.prompt_style}, voice={self.tts_voice}, lang={self.tts_lang}, fpb={self.tts_fpb}"
+            )
+
+            # 3) 同步到伺服器（覆寫/更新 Agent 實例）
+            self._call_create_instance()
+
+            # 4) 不送任何 WS 控制訊息；新設定將在下一輪對話自動生效
+        except Exception as e:
+            self.get_logger().error(f"reload 發生例外：{e}")
+
     def _on_rgb_latest(self, msg: CompressedImage):
         self.latest_img = msg
-        # 可視需要紀錄大小
-        # size = len(msg.data) if msg and msg.data is not None else 0
 
     def _on_latest_audio_meta(self, msg: String):
         try:
@@ -177,6 +244,9 @@ class WSConnectionNode(Node):
 
     def _on_triggered(self, msg: Bool):
         if not msg.data:
+            return
+        if self.is_setting_mode:
+            self.get_logger().info("In setting mode, ignoring trigger.")
             return
         if not self._ws_ready:
             self.get_logger().info("WS 未連線，忽略此次觸發")
@@ -227,15 +297,28 @@ class WSConnectionNode(Node):
         future = asyncio.run_coroutine_threadsafe(
             self._client.send_round(image_b64, wav_bytes), self._loop
         )
-        
+
         try:
-            # 等待結果
-            ok = future.result(timeout=15)  # 設置15秒超時
+            # 等待結果（由 round_timeout_sec 控制）
+            ok = future.result(timeout=self.round_timeout_sec)
             if not ok:
                 self.get_logger().warn("send_round 回傳 False，恢復錄音/解鎖")
                 self._reset_state_after_failure()
+        except cf.TimeoutError as e:
+            # 超時：取消未完成的 coroutine，避免殭屍回合
+            try:
+                future.cancel()
+            except Exception:
+                pass
+            self.get_logger().error(f"send_round 逾時({self.round_timeout_sec}s)：{e}，已取消並恢復錄音/解鎖")
+            self._reset_state_after_failure()
         except Exception as e:
-            self.get_logger().error(f"send_round 執行失敗: {e}，恢復錄音/解鎖")
+            # 其他例外：同樣取消，並復位
+            try:
+                future.cancel()
+            except Exception:
+                pass
+            self.get_logger().error(f"send_round 執行失敗: {e}，已取消並恢復錄音/解鎖")
             self._reset_state_after_failure()
 
     def _read_latest_wav_and_sig(self) -> Tuple[Optional[bytes], Optional[str]]:
