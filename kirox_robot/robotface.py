@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-robot_face_node.py — RobotFace (Qt-only, ROS2-controlled, touch-first, horizontal icons)
+robot_face_node.py — RobotFace (Qt-only, ROS2-controlled, touch-first)
+
+要點：
+- run_cmd_async：非阻塞執行 nmcli，並完整 print log（指令、exit、stdout/stderr）。
+- NetworkOverlay：
+  * 取裝置：不再使用 awk，改在 Python 解析 nmcli dev 輸出（排除 p2p）。
+  * 掃描流程：先 rescan，再延遲 list；必要時第二次 list 合併（避免只剩目前連線）。
+  * Debug 區：顯示指令與摘要（裝置、AP 數量、前幾個 SSID）。
+  * Loading 常駐，只 show/hide，不 delete。
+  * 解析列表用 split(":", 3)，容忍隱藏 SSID；connected 轉成 bool，避免 setEnabled(str)。
+- 移除不支援的 CSS filter。
+- 其餘 UI/ROS2 維持前版行為。
 """
 
 from __future__ import annotations
 import os
 import sys
-import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,33 +27,43 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String as RosString, Bool as RosBool
 
-from PySide6.QtCore import Qt, QRect, QSize, QTimer
-from PySide6.QtGui import QMovie, QColor, QPalette, QKeyEvent, QFont, QIcon
+from PySide6.QtCore import Qt, QRect, QSize, QTimer, QThread, Signal, QObject
+from PySide6.QtGui import QMovie, QColor, QPalette, QKeyEvent, QFont, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QToolButton, QFrame, QVBoxLayout, QHBoxLayout,
-    QMessageBox, QGraphicsDropShadowEffect, QSizePolicy, QGridLayout
+    QGraphicsDropShadowEffect, QSizePolicy, QScrollArea, QPushButton, QLineEdit,
+    QGridLayout, QSpacerItem, QDialog, QScroller 
 )
+
 
 # ---------- 資源 ----------
 ROOT_DIR = Path(__file__).resolve().parent
-ASSETS = ROOT_DIR / "face_ui" / "assets"
+ASSETS = ROOT_DIR / "assets" / "face_ui"
+ASSETS_ICON = ROOT_DIR / "assets" / "icon"
 
 ICONS = {
-    "back":   ASSETS / "back.png",
-    "reload": ASSETS / "reload.png",
-    "wifi":   ASSETS / "wifi.png",
-    "dev":    ASSETS / "dev.png",
-    "gear":   ASSETS / "gear.png",
+    "back":   ASSETS_ICON / "back.png",
+    "reload": ASSETS_ICON / "reload.png",
+    "wifi":   ASSETS_ICON / "wifi.png",
+    "dev":    ASSETS_ICON / "dev.png",
+    "gear":   ASSETS_ICON / "gear.png",
+    "signal0": ASSETS_ICON / "signal-0.png",
+    "signal1": ASSETS_ICON / "signal-1.png",
+    "signal2": ASSETS_ICON / "signal-2.png",
+    "signal3": ASSETS_ICON / "signal-3.png",
+    "lock":    ASSETS_ICON / "lock.png",
+    "unlock":  ASSETS_ICON / "unlock.png",
 }
 
 # ---------- 動畫可調 ----------
 ANIM_MAP: Dict[str, Tuple[Optional[Path], float, Optional[Tuple[int,int]], Tuple[int,int]]] = {
-    "empty":   (None,              1.0, None,        (0, 0)),
-    "loading": (ASSETS/"Todo.gif", 0.8, (600, 600),  (0, 0)),
-    "idle":    (ASSETS/"Todo.gif", 1.0, None,        (0, 0)),
-    "happy":   (ASSETS/"Todo.gif", 1.2, (420, 420),  (0,-40)),
-    "angry":   (ASSETS/"Todo.gif", 0.9, (420, 420),  (0, 40)),
-    "talk":    (ASSETS/"Todo.gif", 1.0, None,        (0, 0)),
+    "empty":   (None,                 1.0, None,        (0, 0)),
+    "loading": (ASSETS/"Loading.gif", 0.9, (150, 150),  (0, 0)),
+    "loading2": (ASSETS/"Loading2.gif", 0.9, (40, 40),  (0, 0)),
+    "idle":    (ASSETS/"Todo.gif",    1.0, None,        (0, 0)),
+    "happy":   (ASSETS/"Todo.gif",    1.2, (420, 420),  (0,-40)),
+    "angry":   (ASSETS/"Todo.gif",    0.9, (420, 420),  (0, 40)),
+    "talk":    (ASSETS/"Todo.gif",    1.0, None,        (0, 0)),
 }
 DEFAULT_ANIM = "empty"
 
@@ -51,6 +71,9 @@ MOUTH_GIF_PATH = ASSETS / "Todo.gif"
 MOUTH_SPEED    = 1.0
 MOUTH_SIZE     = (380, 160)
 MOUTH_OFFSET   = (0, 180)
+
+
+SHOW_NET_DEBUG = False  # ← 量產/使用者模式請關閉
 
 
 @dataclass
@@ -61,6 +84,314 @@ class LayerSpec:
     offset: Tuple[int, int]
 
 
+# ======================== 玻璃 Dialog / Toast ========================
+class GlassDialog(QDialog):
+    def __init__(self, parent=None, title=""):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        base = QFrame(self)
+        base.setObjectName("glass")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(base)
+
+        v = QVBoxLayout(base)
+        v.setContentsMargins(24, 24, 24, 24)
+        v.setSpacing(16)
+
+        if title:
+            lbl = QLabel(title)
+            lbl.setStyleSheet("background:transparent; color:#0e0e0f; font-size:22px; font-weight:700;")
+            v.addWidget(lbl)
+
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setSpacing(12)
+        v.addLayout(self.content_layout)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_ok = QPushButton("確定")
+        for b in (self.btn_cancel, self.btn_ok):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(42)
+            b.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255,255,255,0.96);
+                    border:1px solid rgba(0,0,0,0.08);
+                    border-radius:12px;
+                    padding:8px 16px;
+                    font-weight:600;
+                }
+                QPushButton:hover { border:1px solid rgba(0,0,0,0.18); }
+                QPushButton:pressed { background: rgba(240,240,242,0.96); }
+            """)
+        btns.addWidget(self.btn_cancel)
+        btns.addWidget(self.btn_ok)
+        v.addLayout(btns)
+
+        base.setStyleSheet("""
+            QFrame#glass {
+                background: rgba(255,255,255,0.90);
+                border: 1px solid rgba(255,255,255,0.65);
+                border-radius: 24px;
+            }
+        """)
+        eff = QGraphicsDropShadowEffect(base)
+        eff.setBlurRadius(48)
+        eff.setOffset(0, 16)
+        eff.setColor(QColor(0, 0, 0, 120))
+        base.setGraphicsEffect(eff)
+
+        self.resize(520, 280)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+
+class GlassToast(QWidget):
+    def __init__(self, parent: QWidget, text: str, ms=1800):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QWidget {
+                background: rgba(30,30,32,0.9);
+                color: #fff;
+                border-radius: 14px;
+            }
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lbl = QLabel(text)
+        lbl.setStyleSheet("background:transparent; color:#fff; font-weight:600;")
+        lay.addWidget(lbl)
+        self.adjustSize()
+        self.show()
+        self._place()
+        QTimer.singleShot(ms, self.close)
+
+    def _place(self):
+        if not self.parent():
+            return
+        p = self.parent()
+        x = p.width() - self.width() - 24
+        y = 24
+        self.setGeometry(x, y, self.width(), self.height())
+
+    def resizeEvent(self, _):
+        self._place()
+
+
+# ======================== 後台命令（完整列印 log） ========================
+class CmdWorker(QObject):
+    finished = Signal(int, str, str)  # exit_code, stdout, stderr
+
+    def __init__(self, cmd: str, timeout: float = 8.0, env: Optional[dict] = None):
+        super().__init__()
+        self.cmd = cmd
+        self.timeout = timeout
+        self.env = env or {}
+        self.env.setdefault("LANG", "C")
+        self.env.setdefault("LC_ALL", "C")
+        self.env.setdefault("TERM", "dumb")
+        self.env.setdefault("PATH", os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"))
+
+    def run(self):
+        print(f"[NET] exec: {self.cmd}")
+        try:
+            proc = subprocess.run(
+                ["bash", "-lc", self.cmd],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False, text=True, timeout=self.timeout, env={**os.environ, **self.env}
+            )
+            print(f"[NET] exit={proc.returncode}")
+            print("[NET] stdout:"); print(proc.stdout)
+            print("[NET] stderr:"); print(proc.stderr)
+            self.finished.emit(proc.returncode, proc.stdout.strip(), proc.stderr.strip())
+        except subprocess.TimeoutExpired as e:
+            print(f"[NET] timeout after {self.timeout}s")
+            so = (e.stdout.decode("utf-8", "ignore").strip() if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")).strip()
+            se = f"timeout after {self.timeout}s: {e}"
+            self.finished.emit(124, so, se)
+        except Exception as e:
+            self.finished.emit(1, "", str(e))
+
+
+def run_cmd_async(parent: QWidget, cmd: str, callback, timeout: float = 8.0):
+    th = QThread(parent)
+    worker = CmdWorker(cmd, timeout=timeout)
+    worker.moveToThread(th)
+    th._worker = worker  # 保存引用避免被 GC
+
+    def _done(ec, so, se):
+        try:
+            callback(ec, so, se)
+        finally:
+            th.quit()
+            th.wait()
+            th.deleteLater()
+
+    worker.finished.connect(_done)
+    th.started.connect(worker.run)
+    print(f"[NET] $ {cmd}")
+    th.start()
+
+
+def nmcli_quote(s: str) -> str:
+    s = (s or "").replace('"', '\\"')
+    return f'"{s}"'
+
+
+# ======================== 觸控小鍵盤 ========================
+class VirtualKeyboardDialog(GlassDialog):
+    def __init__(self, parent=None, title="輸入密碼"):
+        super().__init__(parent, title)
+        wrap = QVBoxLayout()
+        wrap.setSpacing(10)
+
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.Password)
+        self.edit.setFixedHeight(46)
+        self.edit.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255,255,255,0.98);
+                border:1px solid rgba(0,0,0,0.12);
+                border-radius: 12px;
+                padding: 8px 12px;
+                font-size: 18px;
+            }
+        """)
+        wrap.addWidget(self.edit)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(8)
+
+        rows = [
+            list("1234567890"),
+            list("qwertyuiop"),
+            list("asdfghjkl"),
+            list("zxcvbnm"),
+        ]
+        self._upper = False
+
+        def add_key(r, c, ch, w=1):
+            btn = QPushButton(ch)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(44)
+            btn.setMinimumWidth(44 * w + (w - 1) * 6)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255,255,255,0.96);
+                    border:1px solid rgba(0,0,0,0.08);
+                    border-radius:10px;
+                    font-size:18px; font-weight:600;
+                }
+                QPushButton:hover { border:1px solid rgba(0,0,0,0.18); }
+                QPushButton:pressed { background: rgba(240,240,242,0.96); }
+            """)
+            btn.clicked.connect(lambda: self._on_key(ch))
+            grid.addWidget(btn, r, c, 1, w)
+
+        for i, ch in enumerate(rows[0]):
+            add_key(0, i, ch)
+        for ri, line in enumerate(rows[1:], start=1):
+            grid.addItem(QSpacerItem(16, 1), ri, 0)
+            for i, ch in enumerate(line):
+                add_key(ri, i + 1, ch)
+
+        ctrl_row = 5
+        self.shift_btn = QPushButton("Shift")
+        self.shift_btn.setFixedHeight(44)
+        self.shift_btn.setCursor(Qt.PointingHandCursor)
+        self.shift_btn.setStyleSheet(self._ctrl_style())
+        self.shift_btn.clicked.connect(self._toggle_upper)
+        grid.addWidget(self.shift_btn, ctrl_row, 0, 1, 2)
+
+        def ctrl(text, cb, col, span=1):
+            b = QPushButton(text)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(44)
+            b.setStyleSheet(self._ctrl_style())
+            b.clicked.connect(cb)
+            grid.addWidget(b, ctrl_row, col, 1, span)
+
+        ctrl("符號", self._symbols, 2, 2)
+        ctrl("空白", lambda: self._on_key(" "), 4, 3)
+        ctrl("退格", self._backspace, 7, 2)
+        ctrl("清空", self._clear, 9, 2)
+        ctrl("顯示/隱藏", self._toggle_echo, 11, 2)
+
+        wrap.addLayout(grid)
+        self.content_layout.addLayout(wrap)
+
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok.clicked.connect(self.accept)
+
+    def _ctrl_style(self):
+        return """
+            QPushButton {
+                background: rgba(245,246,250,0.96);
+                border:1px solid rgba(0,0,0,0.08);
+                border-radius:10px;
+                font-size:16px; font-weight:700;
+            }
+            QPushButton:hover { border:1px solid rgba(0,0,0,0.18); }
+            QPushButton:pressed { background: rgba(235,236,240,0.96); }
+        """
+
+    def _on_key(self, ch: str):
+        self.edit.insert(ch.upper() if self._upper and ch.isalpha() else ch)
+
+    def _toggle_upper(self):
+        self._upper = not self._upper
+        self.shift_btn.setText("SHIFT ▲" if self._upper else "Shift")
+
+    def _symbols(self):
+        dlg = GlassDialog(self, "插入符號")
+        grid = QGridLayout()
+        sym = list("~`!@#$%^&*()-_=+[]{}\\|;:'\",.<>/?")
+        row, col = 0, 0
+        for s in sym:
+            b = QPushButton(s)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedSize(44, 44)
+            b.setStyleSheet(self._ctrl_style())
+            b.clicked.connect(lambda _, ch=s: (self.edit.insert(ch), None))
+            grid.addWidget(b, row, col)
+            col += 1
+            if col >= 10:
+                col = 0
+                row += 1
+        dlg.content_layout.addLayout(grid)
+        dlg.btn_ok.setText("完成")
+        dlg.btn_cancel.setText("關閉")
+        dlg.btn_ok.clicked.connect(dlg.accept)
+        dlg.btn_cancel.clicked.connect(dlg.reject)
+        dlg.exec()
+
+    def _backspace(self):
+        txt = self.edit.text()
+        self.edit.setText(txt[:-1])
+
+    def _clear(self):
+        self.edit.clear()
+
+    def _toggle_echo(self):
+        if self.edit.echoMode() == QLineEdit.Password:
+            self.edit.setEchoMode(QLineEdit.Normal)
+        else:
+            self.edit.setEchoMode(QLineEdit.Password)
+
+    def get_text(self) -> str:
+        return self.edit.text()
+
+
+# ======================== 舞台 ========================
 class MovieCache:
     def __init__(self):
         self._cache: Dict[Path, QMovie] = {}
@@ -73,7 +404,6 @@ class MovieCache:
 
 
 class Stage(QWidget):
-    """16:9 舞台 with letterbox；背景 + 嘴巴兩層"""
     def __init__(self, aspect_w=16, aspect_h=9):
         super().__init__()
         self.aspect_w, self.aspect_h = aspect_w, aspect_h
@@ -170,12 +500,12 @@ class Stage(QWidget):
             label.setGeometry(0, 0, st.width(), st.height())
 
 
-# ------------------------ 設定疊層（自適應網格 / 上圖下字 / 無標題） ------------------------
+# ======================== 設定疊層 ========================
 class SettingsOverlay(QWidget):
-    """
-    暗幕 + 玻璃卡片；自適應網格的 4 顆圓角方形按鈕（上方 icon、下方名稱）。
-    會依視窗寬度在 4/3/2/1 欄之間切換，確保小螢幕不擠。
-    """
+    TARGET_BTN_H = 210
+    MIN_BTN_W = 160
+    MAX_BTN_W = 360
+
     def __init__(self, on_back, on_reload, on_network, on_dev_exit, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -184,15 +514,13 @@ class SettingsOverlay(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
-        outer.setSpacing(0)
         outer.setAlignment(Qt.AlignCenter)
 
-        # 卡片容器
         self.card = QFrame(self)
         self.card.setObjectName("card")
         self.card.setStyleSheet("""
             QFrame#card {
-                background: rgba(255,255,255,0.92);
+                background: rgba(255,255,255,0.96);
                 border: 1px solid rgba(255,255,255,0.70);
                 border-radius: 24px;
             }
@@ -204,30 +532,29 @@ class SettingsOverlay(QWidget):
         self.card.setGraphicsEffect(shadow)
 
         self.card_layout = QVBoxLayout(self.card)
-        self.card_layout.setContentsMargins(24, 20, 24, 20)
-        self.card_layout.setSpacing(0)
+        self.card_layout.setContentsMargins(24, 24, 24, 24)
+        self.card_layout.setAlignment(Qt.AlignCenter)
 
-        self.grid = QGridLayout()
-        self.grid.setContentsMargins(8, 8, 8, 8)
-        self.grid.setHorizontalSpacing(18)
-        self.grid.setVerticalSpacing(18)
-        self.card_layout.addLayout(self.grid)
-        outer.addWidget(self.card)
+        self.hbox = QHBoxLayout()
+        self.hbox.setSpacing(40)
+        self.hbox.setAlignment(Qt.AlignLeft)
+        self.card_layout.addLayout(self.hbox)
+        outer.addWidget(self.card, alignment=Qt.AlignCenter)
 
-        # 建立四顆按鈕（統一樣式）
         self.buttons: List[QToolButton] = []
+
         def build_tool(text: str, icon_path: Path, cb) -> QToolButton:
             btn = QToolButton(self.card)
             btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFocusPolicy(Qt.NoFocus)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             if icon_path.exists():
                 btn.setIcon(QIcon(str(icon_path)))
                 btn.setText(text)
             else:
-                emojis = {"返回":"⬅️","重載配置":"🔄","網路設定":"📶","開發者模式":"🧰"}
-                btn.setText(f"{emojis.get(text,'🔘')}\n{text}")
+                emojis = {"返回": "⬅️", "重載設定": "🔄", "網路設定": "📶", "開發者模式": "🧰"}
+                btn.setText(f"{emojis.get(text, '🔘')}\n{text}")
             btn.clicked.connect(cb)
             btn.setStyleSheet("""
                 QToolButton {
@@ -239,7 +566,8 @@ class SettingsOverlay(QWidget):
                     border-radius: 18px;
                     font-size: 18px;
                     font-weight: 600;
-                    padding: 10px 10px 12px 10px;
+                    padding-top: 22px;
+                    padding-bottom: 14px;
                 }
                 QToolButton:hover { background: rgba(255,255,255,1.0); border: 1px solid rgba(0,0,0,0.18); }
                 QToolButton:pressed { background: rgba(243,244,247,1.0); border: 1px solid rgba(0,0,0,0.22); }
@@ -252,68 +580,631 @@ class SettingsOverlay(QWidget):
             self.buttons.append(btn)
             return btn
 
-        self.btn_back    = build_tool("返回",     ICONS["back"],   on_back)
-        self.btn_reload  = build_tool("重載配置", ICONS["reload"], on_reload)
-        self.btn_network = build_tool("網路設定", ICONS["wifi"],   on_network)
-        self.btn_dev     = build_tool("開發者模式", ICONS["dev"],    on_dev_exit)
+        self.btn_back    = build_tool("返回", ICONS["back"], on_back)
+        self.btn_reload  = build_tool("重載設定", ICONS["reload"], on_reload)
+        self.btn_network = build_tool("網路設定", ICONS["wifi"], on_network)
+        self.btn_dev     = build_tool("開發者模式", ICONS["dev"], on_dev_exit)
 
-        # 先擺一次，後續在 resizeEvent 自適應重排
-        self._relayout()
+        for b in self.buttons:
+            self.hbox.addWidget(b)
+
+        self._apply_sizes()
+
+    def _dpi(self) -> float:
+        screen = self.screen() or QApplication.primaryScreen()
+        return max(0.75, min(2.0, screen.logicalDotsPerInch() / 96.0)) if screen else 1.0
+
+    def _apply_sizes(self):
+        cw = int(self.width() * 0.92)
+        ch = int(self.height() * 0.80)
+        dpi = self._dpi()
+
+        self.card.setMinimumSize(int(720 * dpi), int(360 * dpi))
+        self.card.setMaximumSize(cw, ch)
+        self.card_layout.activate()
+
+        inner_w = int(self.card.contentsRect().width())
+        total_btns = 4
+        gap = int(self.hbox.spacing() or 40)
+        min_gap = 16
+
+        min_w = int(self.MIN_BTN_W * dpi)
+        max_w = int(self.MAX_BTN_W * dpi)
+
+        usable_w = max(0, inner_w - (total_btns - 1) * gap)
+        raw_w = usable_w // total_btns
+        btn_w = max(min_w, min(max_w, raw_w))
+        btn_h = int(self.TARGET_BTN_H * dpi)
+
+        total_width = total_btns * btn_w + (total_btns - 1) * gap
+        if total_width > inner_w:
+            gap = max(min_gap, (inner_w - total_btns * btn_w) // (total_btns - 1))
+            self.hbox.setSpacing(int(gap))
+            total_width = total_btns * btn_w + (total_btns - 1) * gap
+            if total_width > inner_w:
+                btn_w = max(80, (inner_w - (total_btns - 1) * gap) // total_btns)
+                total_width = total_btns * btn_w + (total_btns - 1) * gap
+
+        icon_px = int(max(64 * dpi, min(160 * dpi, btn_w * 0.46))) & ~1
+        for b in self.buttons:
+            b.setFixedSize(int(btn_w), int(btn_h))
+            b.setIconSize(QSize(icon_px, icon_px))
+
+        remain = max(0, inner_w - total_width)
+        left_margin  = remain // 2
+        right_margin = remain - left_margin
+        self.hbox.setContentsMargins(int(left_margin), 0, int(right_margin), 0)
 
     def show_overlay(self):
         self.setVisible(True)
         self.raise_()
-        self._relayout()
+        self._apply_sizes()
 
     def hide_overlay(self):
         self.setVisible(False)
 
     def resizeEvent(self, _):
-        self._relayout()
-
-    def _relayout(self):
-        # 清空 grid
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            w = item.widget()
-            if w:
-                self.grid.removeWidget(w)
-
-        # 依寬度決定欄數與按鈕大小
-        w = max(1, self.width())
-        # 以 240px 為單鍵基準寬，留出左右內距與間距
-        col = max(1, min(4, int((w - 48) // 240)))
-        if col == 0: col = 1
-
-        # icon 與最小尺寸隨 DPI/寬度調整
-        icon_px = 120
-        min_w = 200
-        min_h = 220
-        if w < 1100:
-            icon_px = 96
-            min_w = 180
-            min_h = 200
-        if w < 800:
-            icon_px = 84
-            min_w = 160
-            min_h = 180
-        if w < 640:
-            icon_px = 72
-            min_w = 148
-            min_h = 168
-
-        for b in self.buttons:
-            b.setIconSize(QSize(icon_px, icon_px))
-            b.setMinimumSize(min_w, min_h)
-
-        # 逐行逐列擺放
-        for i, b in enumerate(self.buttons):
-            r, c = divmod(i, col)
-            self.grid.addWidget(b, r, c)
+        self._apply_sizes()
 
 
+# ======================== 網路設定頁 ========================
+class NetworkItem(QWidget):
+    def __init__(self, ssid: str, security: str, signal: int, connected: bool,
+                 on_connect, on_disconnect, parent=None):
+        super().__init__(parent)
+        self.ssid = ssid
+        self.security = security
+        self.signal = signal
+        self.connected = bool(connected)
+
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QWidget {
+                background: rgba(255,255,255,0.98);
+                border:1px solid rgba(0,0,0,0.08);
+                border-radius:16px;
+            }
+            QWidget:hover { border:1px solid rgba(0,0,0,0.16); }
+        """)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(18, 16, 18, 16)   # ← 邊距放大
+        h.setSpacing(12)
+
+        sig_icon = self._signal_icon(signal)
+        sig_label = QLabel()
+        sig_label.setStyleSheet("background:transparent;")
+        if sig_icon.exists():
+            sig_label.setPixmap(QIcon(str(sig_icon)).pixmap(24, 24))
+        else:
+            sig_label.setText("📶")
+            sig_label.setStyleSheet("background:transparent; font-size:20px;")
+        h.addWidget(sig_label)
+
+        v = QVBoxLayout()
+        name = QLabel(ssid or "(隱藏 SSID)")
+        name.setStyleSheet("background:transparent; font-weight:700; font-size:16px; color:#0e0e0f;")
+        sub = QLabel(f"{'加密' if self._secured() else '開放'} · 訊號 {signal}%")
+        sub.setStyleSheet("background:transparent; color:#555; font-size:12px;")
+        v.addWidget(name)
+        v.addWidget(sub)
+        h.addLayout(v, 1)
+
+        lock = QLabel()
+        lock.setStyleSheet("background:transparent;")
+        lock_icon = ICONS["lock"] if self._secured() else ICONS["unlock"]
+        if lock_icon.exists():
+            lock.setPixmap(QIcon(str(lock_icon)).pixmap(18, 18))
+        else:
+            lock.setText("🔒" if self._secured() else "🔓")
+        h.addWidget(lock)
+
+        self.btn = QPushButton("連線" if not self.connected else "已連線")
+        self.btn.setCursor(Qt.PointingHandCursor)
+        self.btn.setFixedHeight(44)  # ← 由 34 提升到 44
+        self.btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(74, 144, 226, 1),
+                    stop:1 rgba(52, 120, 212, 1));
+                color: white; border:none; border-radius: 10px;
+                font-weight:700; padding: 0 14px;
+            }
+            QPushButton:disabled { background: rgba(180,180,185,1); }
+        """)
+        h.addWidget(self.btn)
+
+        self.btn_dis = QPushButton("斷線")
+        self.btn_dis.setCursor(Qt.PointingHandCursor)
+        self.btn_dis.setFixedHeight(44)  # ← 由 34 提升到 44
+        self.btn_dis.setStyleSheet("""
+            QPushButton {
+                background: rgba(240,241,245,1);
+                color: #0e0e0f; border:1px solid rgba(0,0,0,0.08);
+                border-radius:10px; font-weight:700;
+                padding: 0 14px;
+            }
+            QPushButton:hover { border:1px solid rgba(0,0,0,0.18); }
+            QPushButton:pressed { background: rgba(230,231,235,1); }
+        """)
+        h.addWidget(self.btn_dis)
+
+        self.btn.setEnabled(bool(not self.connected))
+        self.btn_dis.setEnabled(bool(self.connected))
+
+        self.btn.clicked.connect(lambda: on_connect(self))
+        self.btn_dis.clicked.connect(lambda: on_disconnect(self))
+
+    def _secured(self) -> bool:
+        return bool(self.security and self.security.lower() not in ("--", "none"))
+
+    def _signal_icon(self, sig: int) -> Path:
+        if sig >= 75: return ICONS["signal3"]
+        if sig >= 45: return ICONS["signal2"]
+        if sig >= 15: return ICONS["signal1"]
+        return ICONS["signal0"]
+
+    def set_connected(self, ok: bool):
+        ok = bool(ok)
+        self.connected = ok
+        self.btn.setEnabled(not ok)
+        self.btn_dis.setEnabled(ok)
+        self.btn.setText("已連線" if ok else "連線")
+
+
+
+class NetworkOverlay(QWidget):
+    """
+    網路設定頁（支援舊版 nmcli：不用 --separator，改用 -e yes 逃脫並在 Python 安全切欄位）
+    也修正：
+      - connected 一律轉 bool。
+      - 隱藏 SSID 容忍。
+      - 詳細 print log（前綴 [robotface-UI][NET]；由 SHOW_NET_DEBUG 控制）。
+    """
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("background-color: rgba(12, 12, 14, 180);")
+        self.setVisible(False)
+
+        self._current_dev = ""
+        self._is_scanning = False
+        self._tail_spacer: Optional[QSpacerItem] = None
+        self._debug_last_cmds: List[str] = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+
+        card = QFrame(self)
+        card.setObjectName("netcard")
+        card.setStyleSheet("""
+            QFrame#netcard {
+                background: rgba(255,255,255,0.96);
+                border: 1px solid rgba(255,255,255,0.70);
+                border-radius: 24px;
+            }
+        """)
+        eff = QGraphicsDropShadowEffect(card)
+        eff.setBlurRadius(48); eff.setOffset(0, 16); eff.setColor(QColor(0,0,0,120))
+        card.setGraphicsEffect(eff)
+        outer.addWidget(card, 1)
+
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 20)
+        v.setSpacing(10)
+
+        top = QHBoxLayout()
+        title = QLabel("網路設定")
+        title.setStyleSheet("background:transparent; font-size:22px; font-weight:800; color:#0e0e0f;")
+        top.addWidget(title)
+        top.addStretch(1)
+
+        self.btn_refresh = QPushButton("重新整理")
+        self.btn_refresh.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh.setFixedHeight(34)
+        self.btn_refresh.setStyleSheet("""
+            QPushButton {
+                background: rgba(245,246,250,1);
+                border:1px solid rgba(0,0,0,0.08);
+                border-radius:10px; font-weight:700; padding: 0 12px;
+            }
+            QPushButton:hover { border:1px solid rgba(0,0,0,0.16); }
+            QPushButton:pressed { background: rgba(235,236,240,1); }
+        """)
+        self.btn_close = QPushButton("返回")
+        self.btn_close.setCursor(Qt.PointingHandCursor)
+        self.btn_close.setFixedHeight(34)
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(250,250,252,1),
+                    stop:1 rgba(236,238,242,1));
+                border:1px solid rgba(0,0,0,0.08); border-radius:10px;
+                font-weight:700; padding: 0 12px;
+            }
+            QPushButton:hover { border:1px solid rgba(0,0,0,0.16); }
+            QPushButton:pressed { background: rgba(243,244,247,1); }
+        """)
+        top.addWidget(self.btn_refresh)
+        top.addWidget(self.btn_close)
+        v.addLayout(top)
+
+        self.lbl_status = QLabel("目前連線：讀取中…")
+        self.lbl_status.setStyleSheet("background:transparent; color:#333; font-size:13px;")
+        v.addWidget(self.lbl_status)
+
+        # Debug 區（僅在 SHOW_NET_DEBUG 時加入版面）
+        self.lbl_debug = QLabel("")
+        self.lbl_debug.setWordWrap(True)
+        self.lbl_debug.setStyleSheet("background:transparent; color:#7a7a7a; font-size:12px;")
+        if SHOW_NET_DEBUG:
+            v.addWidget(self.lbl_debug)
+        else:
+            self.lbl_debug.hide()
+
+        # 清單（可觸控 kinetic scroll） + 加粗捲軸
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea { border:none; background:transparent; }
+            QScrollArea > QWidget > QWidget { background:transparent; }
+
+            QScrollBar:vertical {
+                width: 26px;
+                background: transparent;
+                margin: 6px 4px 6px 4px;
+                border-radius: 12px;
+            }
+            QScrollBar::handle:vertical {
+                min-height: 40px;
+                border-radius: 12px;
+                background: rgba(0,0,0,0.22);
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(0,0,0,0.32);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        self.list_container = QWidget()
+        self.list_container.setStyleSheet("background:transparent;")
+        self.list_layout = QVBoxLayout(self.list_container)
+        self.list_layout.setContentsMargins(4, 4, 4, 4)
+        self.list_layout.setSpacing(8)
+        scroll.setWidget(self.list_container)
+
+        # 觸控/滑鼠拖曳即可滑動（kinetic scroll）
+        QScroller.grabGesture(scroll.viewport(), QScroller.TouchGesture)
+        QScroller.grabGesture(scroll.viewport(), QScroller.LeftMouseButtonGesture)
+
+        v.addWidget(scroll, 1)
+
+        # 常駐 loading（不 delete，只 show/hide）
+        self.loading = QLabel(self.list_container)
+        self.loading.setAlignment(Qt.AlignCenter)
+        self.loading.setStyleSheet("background:transparent; color:#666;")
+        self.loading_movie = QMovie(str(ANIM_MAP.get("loading2", (None,))[0])) if ANIM_MAP.get("loading2", (None,))[0] else None
+        if self.loading_movie:
+            self.loading.setMovie(self.loading_movie)
+            self.loading_movie.setScaledSize(QSize(96, 96))
+
+        tip = QLabel("提示：若未找到 Wi-Fi，請確認 NetworkManager（nmcli）已啟用；勿與 wpa_supplicant/connman 衝突。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("background:transparent; color:#666; font-size:12px;")
+        v.addWidget(tip)
+
+        self.btn_close.clicked.connect(self.hide_overlay)
+        self.btn_refresh.clicked.connect(self.refresh)
+
+        QTimer.singleShot(100, self.refresh)
+
+    # ---- Log helper（受 SHOW_NET_DEBUG 控制） ----
+    def _log(self, *args):
+        if SHOW_NET_DEBUG:
+            print("[robotface-UI][NET]", *args, flush=True)
+
+    # ---- 文字工具：nmcli 嚴格 split（處理 \: 與 \\） ----
+    @staticmethod
+    def _split_nmcli(line: str) -> List[str]:
+        """把 nmcli -t -e yes 用 ':' 分隔的行，做成欄位；支援 '\:' 與 '\\' 轉義。"""
+        out = []
+        buf = []
+        esc = False
+        for ch in line:
+            if esc:
+                if ch in [':', '\\']:
+                    buf.append(ch)
+                else:
+                    buf.append(ch)
+                esc = False
+            else:
+                if ch == '\\':
+                    esc = True
+                elif ch == ':':
+                    out.append(''.join(buf))
+                    buf = []
+                else:
+                    buf.append(ch)
+        out.append(''.join(buf))
+        return out
+
+    # ---- Overlay lifecycle ----
+    def show_overlay(self):
+        self.setVisible(True)
+        self.raise_()
+        self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+
+    def hide_overlay(self):
+        self.setVisible(False)
+
+    def resizeEvent(self, _):
+        self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+
+    # ---- 掃描流程 ----
+    def refresh(self):
+        if self._is_scanning:
+            return
+        self._is_scanning = True
+        self._debug_last_cmds.clear()
+        self._set_debug("開始掃描…")
+        self._clear_list()
+        self._show_loading(True)
+        self._toast("正在掃描 Wi-Fi…")
+        self._log("=== refresh ===")
+
+        # 取第一個 wifi 裝置（先 connected，再 disconnected）
+        cmd_dev = r"""nmcli -t -f DEVICE,TYPE,STATE dev | awk -F: '($2=="wifi" && $1 !~ /p2p/ && ($3=="connected" || $3=="disconnected")){print $1; exit}'"""
+        self._remember(cmd_dev)
+        self._log("$", cmd_dev)
+        run_cmd_async(self, cmd_dev, self._on_device, timeout=5.0)
+
+        QTimer.singleShot(10000, self._scan_timeout_guard)  # 10 秒超時
+
+    def _on_device(self, ec, out, err):
+        self._log("exec: device → ec=", ec, "stdout:\n"+(out or ""), "stderr:\n"+(err or ""))
+        self._current_dev = out.strip() if (ec == 0 and out and out.strip()) else ""
+        self._log("device picked:", self._current_dev or "(none)")
+
+        # 目前連線的 SSID（不用 --separator；改自己 split）
+        cmd_cur = r"""nmcli -t -e yes -f ACTIVE,SSID dev wifi"""
+        self._remember(cmd_cur)
+        self._log("$", cmd_cur)
+        run_cmd_async(self, cmd_cur, self._on_current, timeout=4.0)
+
+        # 先 rescan（有介面就帶 ifname）
+        if self._current_dev:
+            cmd_rescan = f"nmcli dev wifi rescan ifname {nmcli_quote(self._current_dev)}"
+        else:
+            cmd_rescan = "nmcli dev wifi rescan"
+        self._remember(cmd_rescan)
+        self._log("$", cmd_rescan)
+        run_cmd_async(self, cmd_rescan, self._after_rescan, timeout=5.0)
+
+    def _on_current(self, ec, out, err):
+        cur = ""
+        if ec == 0 and out is not None:
+            for ln in out.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                parts = self._split_nmcli(ln)
+                if len(parts) >= 2 and parts[0] == "yes":
+                    cur = parts[1]
+                    break
+        self.lbl_status.setText(f"目前連線：{cur}" if cur else "目前連線：無")
+        self._log("current SSID ec=", ec, "→", repr(cur), "err=", err or "")
+
+    def _after_rescan(self, ec, out, err):
+        self._log("rescan ec=", ec, "out=", out or "", "err=", err or "")
+        def _list():
+            base = "nmcli -t -e yes -f IN-USE,SSID,SECURITY,SIGNAL dev wifi list"
+            cmd_list = f'{base} ifname {nmcli_quote(self._current_dev)}' if self._current_dev else base
+            self._remember(cmd_list)
+            self._log("$", cmd_list)
+            run_cmd_async(self, cmd_list, self._on_scan_first, timeout=6.0)
+        QTimer.singleShot(1200, _list)  # 硬體掃描緩衝
+
+    def _on_scan_first(self, ec, out, err):
+        lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+        self._log("list#1 ec=", ec, "nlines=", len(lines), "err=", err or "")
+        # 若只列出 1 筆或更少，再做一次不指定 ifname 的 list 合併
+        if ec == 0 and len(lines) < 2:
+            cmd_scan2 = "nmcli -t -e yes -f IN-USE,SSID,SECURITY,SIGNAL dev wifi list"
+            primary_out = out or ""
+            self._remember(cmd_scan2)
+            self._log("$", cmd_scan2)
+            run_cmd_async(self, cmd_scan2, lambda e2, o2, s2: self._on_scan_merge(primary_out=primary_out, ec=e2, out=o2, err=s2), timeout=6.0)
+        else:
+            self._on_scan(ec, out, err)
+
+    def _on_scan_merge(self, primary_out: str, ec: int, out: str, err: str):
+        merged = []
+        for raw in (primary_out, out or ""):
+            for ln in raw.splitlines():
+                ln = ln.rstrip("\n")
+                if ln and ln not in merged:
+                    merged.append(ln)
+        self._log("list#merge ec=", ec, "merged_n=", len(merged))
+        self._on_scan(0 if merged else ec, "\n".join(merged), err)
+
+    def _scan_timeout_guard(self):
+        if self._is_scanning:
+            self._is_scanning = False
+            self._show_loading(False)
+            self._set_debug("掃描逾時。")
+            self._toast("掃描逾時，已停止等待。可以再按「重新整理」。", ms=2200)
+            self._log("TIMEOUT: scan")
+
+    def _on_scan(self, ec, out, err):
+        self._is_scanning = False
+        self._show_loading(False)
+        self._clear_list()
+
+        if ec != 0:
+            msg = (err or out or "").strip()
+            if "nmcli" in (err or "") and "not found" in (err.lower() if err else ""):
+                msg = "找不到 nmcli，請先安裝 NetworkManager。"
+            elif "device not managed" in ((out or "") + (err or "")).lower():
+                msg = "Wi-Fi 裝置未由 NetworkManager 管理。"
+            self._set_debug(f"掃描失敗：{msg}")
+            self._toast(f"掃描失敗：{msg or '未知錯誤'}", ms=2800)
+            self._log("scan FAILED:", msg)
+            return
+
+        current = self._current_ssid_text()
+        items = []
+        seen = set()
+
+        for ln in (out or "").splitlines():
+            parts = self._split_nmcli(ln)
+            if len(parts) < 4:
+                # 容錯：再嘗試傳統 split（某些老舊 nmcli 可能沒 escape）
+                parts = ln.split(":")
+                if len(parts) < 4:
+                    continue
+
+            inuse = (parts[0].strip() == "*")
+            ssid = (parts[1] or "").strip()           # 允許空字串（隱藏 SSID）
+            sec  = (parts[2] or "--").strip()
+            try:
+                sig = int((parts[3] or "0").strip())
+            except Exception:
+                sig = 0
+
+            key = (ssid, sec)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            connected = bool(inuse or (ssid == current and ssid != ""))
+            item = NetworkItem(
+                ssid=ssid, security=sec, signal=sig, connected=connected,
+                on_connect=self._connect_flow, on_disconnect=self._disconnect_flow
+            )
+            self.list_layout.addWidget(item)
+            items.append(item)
+
+        preview = ", ".join([(it.ssid or "(隱藏)") for it in items[:6]])
+        self._set_debug(
+            "dev=" + (self._current_dev or "(未偵測)") + f"；AP 共 {len(items)} 筆" +
+            (f"；前幾個：{preview}" if items else "") +
+            ("\n指令：\n" + "\n".join(f"- {c}" for c in self._debug_last_cmds))
+        )
+        self._log("summary ->\n" + self.lbl_debug.text())
+
+        if not items:
+            hint = QLabel("找不到 Wi-Fi 熱點。可能無無線介面或被其他程式佔用。")
+            hint.setStyleSheet("background:transparent; color:#444; font-weight:600;")
+            self.list_layout.addWidget(hint)
+
+        if not self._tail_spacer:
+            self._tail_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        self.list_layout.addItem(self._tail_spacer)
+
+    # ---- UI 輔助 ----
+    def _clear_list(self):
+        if not self.list_layout:
+            return
+        for i in reversed(range(self.list_layout.count())):
+            it = self.list_layout.takeAt(i)
+            w = it.widget()
+            if w is None:
+                continue
+            if w is self.loading:
+                self.loading.hide()
+            else:
+                w.deleteLater()
+
+    def _show_loading(self, on: bool):
+        if on:
+            if self.loading_movie:
+                self.loading_movie.start()
+            else:
+                self.loading.setText("掃描中…")
+            already = any(self.list_layout.itemAt(i).widget() is self.loading
+                          for i in range(self.list_layout.count()))
+            if not already:
+                self.list_layout.insertWidget(0, self.loading, alignment=Qt.AlignCenter)
+            self.loading.show()
+        else:
+            if self.loading_movie:
+                self.loading_movie.stop()
+            self.loading.hide()
+
+    def _current_ssid_text(self) -> str:
+        t = self.lbl_status.text()
+        return t.split("：", 1)[-1].strip() if "：" in t else ""
+
+    # 這三個方法會在 SHOW_NET_DEBUG=False 時什麼都不做
+    def _set_debug(self, text: str):
+        if SHOW_NET_DEBUG:
+            self.lbl_debug.setText(text or "")
+
+    def _remember(self, cmd: str):
+        if SHOW_NET_DEBUG:
+            self._debug_last_cmds.append(cmd)
+
+    # ---- 連線 / 斷線 ----
+    def _connect_flow(self, item: NetworkItem):
+        ssid = item.ssid or ""
+        if ssid == "":
+            self._toast("此 AP 為隱藏 SSID，暫不支援。", ms=2200)
+            return
+
+        if item.security and item.security.lower() not in ("--", "none"):
+            kb = VirtualKeyboardDialog(self, f"連線到「{ssid}」")
+            if kb.exec() != QDialog.Accepted:
+                return
+            pw = kb.get_text()
+            if not pw:
+                self._toast("未輸入密碼。", ms=1500); return
+            self._toast("嘗試連線中…")
+            cmd = f"nmcli dev wifi connect {nmcli_quote(ssid)} password {nmcli_quote(pw)}"
+        else:
+            self._toast("嘗試連線中…")
+            cmd = f"nmcli dev wifi connect {nmcli_quote(ssid)}"
+        self._remember(cmd)
+        self._log("$", cmd)
+        run_cmd_async(self, cmd, lambda ec, out, err: self._on_connect_result(ec, out, err, item), timeout=12.0)
+
+    def _on_connect_result(self, ec, out, err, item: NetworkItem):
+        self._log("connect ec=", ec, "out=", out or "", "err=", err or "")
+        if ec == 0:
+            item.set_connected(True)
+            self._toast(f"已連線到「{item.ssid or '(隱藏)'}」", ms=1800)
+            self.refresh()
+        else:
+            self._toast(err or out or "連線失敗", ms=2600)
+
+    def _disconnect_flow(self, item: NetworkItem):
+        self._toast("正在斷線…")
+        if self._current_dev:
+            cmd = f"nmcli dev disconnect {nmcli_quote(self._current_dev)}"
+        else:
+            # 用普通字串相鄰拼接，awk 內的雙引號用 \"，避免 Python 字串被破壞
+            cmd = (
+                "nmcli -t -f DEVICE,TYPE dev status | "
+                "awk -F: '$2==\"wifi\"{print $1; exit}' | "
+                "xargs -r -n1 -I{} nmcli dev disconnect {}"
+            )
+        self._remember(cmd)
+        self._log("$", cmd)
+        run_cmd_async(self, cmd, self._on_disconnected, timeout=8.0)
+
+    def _on_disconnected(self, ec, out, err):
+        self._log("disconnect ec=", ec, "out=", out or "", "err=", err or "")
+        if ec == 0:
+            self._toast("已斷線", ms=1600)
+            self.refresh()
+        else:
+            self._toast(err or "斷線失敗", ms=2400)
+
+    def _toast(self, text: str, ms=1800):
+        GlassToast(self, text, ms)
+
+
+
+# ======================== 齒輪（半透明玻璃） ========================
 class SettingsButton(QToolButton):
-    """右上角齒輪（QToolButton）"""
     def __init__(self, parent: QWidget, on_click):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
@@ -328,15 +1219,19 @@ class SettingsButton(QToolButton):
         self.clicked.connect(on_click)
         self.setStyleSheet("""
             QToolButton {
-                background-color: rgba(255, 255, 255, 180);
+                background-color: rgba(255, 255, 255, 140);
                 color: #0e0e0f;
                 border-radius: 34px;
-                border: 1px solid rgba(0,0,0,0.08);
-                font-size: 30px;
+                border: 1px solid rgba(255,255,255,0.7);
             }
-            QToolButton:hover { background-color: rgba(255,255,255,220); }
-            QToolButton:pressed { background-color: rgba(240,240,240,220); }
+            QToolButton:hover  { background-color: rgba(255, 255, 255, 170); }
+            QToolButton:pressed{ background-color: rgba(245,245,245, 190); }
         """)
+        eff = QGraphicsDropShadowEffect(self)
+        eff.setBlurRadius(24)
+        eff.setOffset(0, 6)
+        eff.setColor(QColor(0, 0, 0, 90))
+        self.setGraphicsEffect(eff)
 
     def update_position(self):
         p = self.parent()
@@ -350,6 +1245,7 @@ class SettingsButton(QToolButton):
         super().showEvent(e)
 
 
+# ======================== MainWindow ========================
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -361,25 +1257,30 @@ class MainWindow(QWidget):
         self.stage = Stage()
         self.stage.setParent(self)
 
-        self.btn = SettingsButton(self, on_click=lambda: None)
+        self.btn = SettingsButton(self, on_click=self._on_settings_btn)
         self.btn.raise_()
         self.btn.show()
 
         self.overlay = SettingsOverlay(
-            on_back      = lambda: None,
-            on_reload    = lambda: None,
-            on_network   = lambda: None,
-            on_dev_exit  = lambda: None,
+            on_back      = self._on_overlay_back,
+            on_reload    = self._on_overlay_reload,
+            on_network   = self._on_overlay_network,
+            on_dev_exit  = self._on_overlay_dev_exit,
             parent=self
         )
         self.overlay.setGeometry(0, 0, self.width(), self.height())
         self.overlay.lower()
+
+        self.net_overlay = NetworkOverlay(self)
+        self.net_overlay.setVisible(False)
         self.showFullScreen()
 
     def resizeEvent(self, _):
         self.stage.setGeometry(0, 0, self.width(), self.height())
         self.btn.update_position()
         self.overlay.setGeometry(0, 0, self.width(), self.height())
+        if self.net_overlay.isVisible():
+            self.net_overlay.setGeometry(0, 0, self.width(), self.height())
 
     def keyPressEvent(self, e: QKeyEvent):
         if e.key() == Qt.Key_Escape:
@@ -387,37 +1288,52 @@ class MainWindow(QWidget):
         elif e.key() == Qt.Key_F11:
             self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
+    def _on_settings_btn(self):
+        self.overlay.show_overlay()
 
-# ------------------------ 主節點 ------------------------
+    def _on_overlay_back(self):
+        self.overlay.hide_overlay()
+
+    def _on_overlay_reload(self):
+        self.overlay.hide_overlay()
+        GlassToast(self, "已發送重載指令", 1400)
+
+    def _on_overlay_network(self):
+        self.overlay.hide_overlay()
+        self.net_overlay.show_overlay()
+
+    def _on_overlay_dev_exit(self):
+        self.overlay.hide_overlay()
+        # 實際結束流程交由 ROS2 節點
+
+
+# ======================== ROS2 節點 ========================
 class RobotFaceNode(Node):
     def __init__(self, ui: MainWindow):
         super().__init__("robot_face_node")
         self.ui = ui
 
-        # 嘴巴 spec
         self._mouth_spec = LayerSpec(MOUTH_GIF_PATH, MOUTH_SPEED, MOUTH_SIZE, MOUTH_OFFSET)
         self.ui.stage.set_mouth(self._mouth_spec, play=False)
 
-        # 初始動畫
         self._apply_animation(DEFAULT_ANIM)
 
-        # ROS I/O
         self.create_subscription(RosString, "face/animation", self._on_anim, 10)
         self.create_subscription(RosBool,   "face/speaking",  self._on_speaking, 10)
 
         self.setting_mode_pub = self.create_publisher(RosBool, "system/setting_mode", 10)
         self.reload_pub       = self.create_publisher(RosBool, "system/reload_config", 10)
 
-        # 顯/隱 overlay
-        self._local_setting_mode = False
         self.ui.btn.clicked.connect(lambda: self._toggle_settings(True))
+        self.ui._on_overlay_back = lambda: self._toggle_settings(False)
+        self.ui._on_overlay_reload = self._action_reload
+        self.ui._on_overlay_network = self._action_network
+        self.ui._on_overlay_dev_exit = self._action_dev_exit
 
-        # 非阻塞 ROS spin
         self._qt_timer = QTimer()
         self._qt_timer.timeout.connect(lambda: rclpy.spin_once(self, timeout_sec=0.0))
         self._qt_timer.start(10)
 
-    # ---- 動畫/說話 ----
     def _on_anim(self, msg: RosString):
         name = msg.data.strip()
         self._apply_animation(name if name in ANIM_MAP else DEFAULT_ANIM)
@@ -433,109 +1349,58 @@ class RobotFaceNode(Node):
             spec = None
         self.ui.stage.set_background(spec)
 
-    # ---- 設定疊層 ----
     def _toggle_settings(self, show: bool):
         if show:
-            if not self._local_setting_mode:
-                self.setting_mode_pub.publish(RosBool(data=True))
-                self._local_setting_mode = True
-            self._connect_overlay_buttons()
+            self.setting_mode_pub.publish(RosBool(data=True))
             self.ui.overlay.show_overlay()
         else:
-            if self._local_setting_mode:
-                self.setting_mode_pub.publish(RosBool(data=False))
-                self._local_setting_mode = False
+            self.setting_mode_pub.publish(RosBool(data=False))
             self.ui.overlay.hide_overlay()
-
-    def _connect_overlay_buttons(self):
-        # 先斷開舊連線避免重複觸發
-        for btn, slot in [
-            (self.ui.overlay.btn_back,    self._action_back),
-            (self.ui.overlay.btn_reload,  self._action_reload),
-            (self.ui.overlay.btn_network, self._action_network),
-            (self.ui.overlay.btn_dev,     self._action_dev_exit),
-        ]:
-            try:
-                btn.clicked.disconnect()
-            except Exception:
-                pass
-            btn.clicked.connect(slot)
-
-    # 四顆按鈕的動作
-    def _action_back(self):
-        self._toggle_settings(False)
 
     def _action_reload(self):
         self.reload_pub.publish(RosBool(data=True))
-        QMessageBox.information(self.ui, "重載設定", "已發送重載指令。設定將於下一回合生效。")
+        GlassToast(self.ui, "已發送重載指令", 1400)
         self._toggle_settings(False)
 
     def _action_network(self):
-        QMessageBox.information(self.ui, "網路設定", "網路設定功能尚未實作。")
+        self._toggle_settings(False)
+        self.ui.net_overlay.show_overlay()
 
     def _action_dev_exit(self):
         self.get_logger().warn("[DevMode] 將結束所有 ROS2 相關進程並退出")
         self._kill_ros2_launch_processes()
         QApplication.quit()
 
-    # ---- 系統層操作：結束 ros2 進程（先 TERM 再 KILL；避開自身） ----
     def _kill_ros2_launch_processes(self):
         my_pid = os.getpid()
         patterns = [
-            r"ros2 launch",
-            r"ros2 run",
-            r"launch\.py",
-            r"kirox_robot",
-            r"robotears", r"roboteyes", r"robotbrain", r"robotbody", r"robotface"
+            r"ros2 launch", r"ros2 run", r"launch\.py", r"colcon.*launch",
+            r"kirox_robot", r"robotears", r"roboteyes", r"robotbrain", r"robotbody", r"robotface",
         ]
 
-        # 1) 溫和結束：TERM
-        for pat in patterns:
-            try:
-                subprocess.run(
-                    ["bash", "-lc", f"pgrep -f \"{pat}\" | grep -v -w {my_pid} | xargs -r -n1 kill -TERM"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                pass
+        def _kill_where(sig: str):
+            for pat in patterns:
+                try:
+                    subprocess.run(
+                        ["bash", "-lc", f"pgrep -f \"{pat}\" | grep -v -w {my_pid} | xargs -r -n1 -I{{}} kill -{sig} {{}}"],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                except Exception:
+                    pass
 
-        # 小等一下
-        try:
-            subprocess.run(["bash", "-lc", "sleep 0.7"], check=False)
-        except Exception:
-            pass
+        _kill_where("TERM")
+        subprocess.run(["bash", "-lc", "sleep 0.8"], check=False)
+        _kill_where("TERM")
+        subprocess.run(["bash", "-lc", "sleep 0.5"], check=False)
+        _kill_where("KILL")
 
-        # 2) 二次清理：尚存者再 TERM 一次（防殭屍）
-        for pat in patterns:
-            try:
-                subprocess.run(
-                    ["bash", "-lc", f"pgrep -f \"{pat}\" | grep -v -w {my_pid} | xargs -r -n1 kill -TERM"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                pass
-
-        try:
-            subprocess.run(["bash", "-lc", "sleep 0.5"], check=False)
-        except Exception:
-            pass
-
-        # 3) 強制：KILL
-        for pat in patterns:
-            try:
-                subprocess.run(
-                    ["bash", "-lc", f"pgrep -f \"{pat}\" | grep -v -w {my_pid} | xargs -r -n1 kill -KILL"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                pass
-
-        # 4) 預防殘存的 ros2/launch 殼層
         final_cmds = [
             "pkill -f '^python3 .*ros2.*launch' || true",
             "pkill -f '^/usr/bin/python3 .*launch.*\\.py' || true",
             "pkill -f 'ros2 launch' || true",
             "pkill -f 'ros2 run' || true",
+            "pkill -f 'kirox_robot' || true",
+            "pkill -f 'robotears|roboteyes|robotbrain|robotbody|robotface' || true",
         ]
         for c in final_cmds:
             try:
@@ -545,15 +1410,19 @@ class RobotFaceNode(Node):
                 pass
 
 
+# ======================== 進入點 ========================
 def main(argv=None):
-    # 觸控合成，確保觸控能點
     QApplication.setAttribute(Qt.AA_SynthesizeTouchForUnhandledMouseEvents, True)
     QApplication.setAttribute(Qt.AA_SynthesizeMouseForUnhandledTouchEvents, True)
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
 
     rclpy.init(args=argv)
     app = QApplication(sys.argv)
-    app.setFont(QFont("SF Pro Text", 12))
+
+    try:
+        app.setFont(QFont("SF Pro Text", 12))
+    except Exception:
+        pass
 
     win = MainWindow()
     node = RobotFaceNode(win)

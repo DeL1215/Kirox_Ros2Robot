@@ -93,7 +93,7 @@ class RobotEarsNode(Node):
 
         # ---- 偵測/計分（必要少量）----
         self.declare_parameter("frame_ms", 32)
-        self.declare_parameter("start_prob", 0.60)
+        self.declare_parameter("start_prob", 0.30) #原本0.6
         self.declare_parameter("end_prob", 0.35)
         self.declare_parameter("k_start", 3)
         self.declare_parameter("k_end", 16)
