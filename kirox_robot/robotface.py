@@ -47,6 +47,7 @@ ICONS = {
     "wifi":   ASSETS_ICON / "wifi.png",
     "dev":    ASSETS_ICON / "dev.png",
     "gear":   ASSETS_ICON / "gear.png",
+    "noconnection": ASSETS_ICON / "No_connection.png",
     "signal0": ASSETS_ICON / "signal-0.png",
     "signal1": ASSETS_ICON / "signal-1.png",
     "signal2": ASSETS_ICON / "signal-2.png",

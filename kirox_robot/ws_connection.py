@@ -97,6 +97,9 @@ class WSConnectionNode(Node):
         self.speaking_pub = self.create_publisher(Bool, "face/speaking", speaking_qos)
         self.speaking_pub.publish(Bool(data=False))  # 啟動時關閉嘴巴
 
+        # **新增：face/animation（latched）僅供連線錯誤/無網路時使用**
+        self.face_pub = self.create_publisher(String, "face/animation", latched_qos)
+
         # 狀態
         self._last_round_t = 0.0
         self._last_audio_sig: Optional[str] = None
@@ -164,8 +167,13 @@ class WSConnectionNode(Node):
             server_url=self.rest_create_url,
             timeout=10,
         )
+        # 僅網路/連線錯誤（返回 None）才發佈 noconnection；其他狀態不改臉
         if res is None:
             self.get_logger().warn("create_instance 失敗: timeout or network error")
+            try:
+                self.face_pub.publish(String(data="noconnection"))
+            except Exception:
+                pass
         elif not (res.get("ok") or res.get("status") == "ok"):
             self.get_logger().warn(f"create_instance 失敗: {res.get('reason') or res.get('message') or 'unknown server error'}")
         else:
@@ -179,6 +187,7 @@ class WSConnectionNode(Node):
         self.rec_enable_pub.publish(Bool(data=True))
         self.speaking_pub.publish(Bool(data=False))
         self._busy = False
+        # 連線成功不主動改動畫（避免非網路情境被覆蓋）
 
     def _on_ws_disconnected(self):
         self._ws_ready = False
@@ -187,6 +196,11 @@ class WSConnectionNode(Node):
         self.rec_enable_pub.publish(Bool(data=True))
         self.speaking_pub.publish(Bool(data=False))
         self._busy = False
+        # 僅在斷線（網路/連線錯誤）時發佈 noconnection
+        try:
+            self.face_pub.publish(String(data="noconnection"))
+        except Exception:
+            pass
 
     def _on_play_start(self):
         # server 宣告即將播放 → 關錄音避免自錄，嘴巴動畫打開
@@ -250,6 +264,7 @@ class WSConnectionNode(Node):
             return
         if not self._ws_ready:
             self.get_logger().info("WS 未連線，忽略此次觸發")
+            # 這裡可能是初始化或非網路錯誤，不發佈 noconnection
             return
         if self._busy:
             self.get_logger().info("忙碌中（上一輪尚未結束），忽略此次觸發")
@@ -304,6 +319,11 @@ class WSConnectionNode(Node):
             if not ok:
                 self.get_logger().warn("send_round 回傳 False，恢復錄音/解鎖")
                 self._reset_state_after_failure()
+                # 僅當送出失敗（多半為連線錯誤）時，發佈 noconnection
+                try:
+                    self.face_pub.publish(String(data="noconnection"))
+                except Exception:
+                    pass
         except cf.TimeoutError as e:
             # 超時：取消未完成的 coroutine，避免殭屍回合
             try:
@@ -312,6 +332,11 @@ class WSConnectionNode(Node):
                 pass
             self.get_logger().error(f"send_round 逾時({self.round_timeout_sec}s)：{e}，已取消並恢復錄音/解鎖")
             self._reset_state_after_failure()
+            # 超時屬於通訊失敗情境，發佈 noconnection
+            try:
+                self.face_pub.publish(String(data="noconnection"))
+            except Exception:
+                pass
         except Exception as e:
             # 其他例外：同樣取消，並復位
             try:
@@ -320,6 +345,11 @@ class WSConnectionNode(Node):
                 pass
             self.get_logger().error(f"send_round 執行失敗: {e}，已取消並恢復錄音/解鎖")
             self._reset_state_after_failure()
+            # 送出過程發生例外，多半為連線錯誤，發佈 noconnection
+            try:
+                self.face_pub.publish(String(data="noconnection"))
+            except Exception:
+                pass
 
     def _read_latest_wav_and_sig(self) -> Tuple[Optional[bytes], Optional[str]]:
         meta = self.latest_audio_meta or {}
