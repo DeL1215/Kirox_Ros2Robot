@@ -221,24 +221,59 @@ class CmdWorker(QObject):
         except Exception as e:
             self.finished.emit(1, "", str(e))
 
-
+            
 def run_cmd_async(parent: QWidget, cmd: str, callback, timeout: float = 8.0):
-    th = QThread(parent)
+    """
+    在背景執行 shell 指令；結果回到 parent 所在的主執行緒呼叫 callback。
+    - Worker 只做 run(); 不觸碰 UI。
+    - 透過一個駐留在 parent thread 的 invoker.Signal，把結果排入主執行緒。
+    - 結束後安全地關閉/回收 QThread。
+    """
+    from PySide6.QtCore import QObject, Signal, QTimer, QThread
+
+    # 建立工作緒與 worker（不把 thread 掛在 QWidget 底下，避免 thread affinity 混淆）
+    th = QThread()
+    th.setObjectName("CmdThread")
     worker = CmdWorker(cmd, timeout=timeout)
     worker.moveToThread(th)
-    th._worker = worker  # 保存引用避免被 GC
 
-    def _done(ec, so, se):
+    # 建立一個駐留在「parent 所在執行緒」的轉發器，負責把結果丟回主執行緒
+    class _Invoker(QObject):
+        sig = Signal(int, str, str)  # (exit_code, stdout, stderr)
+
+    invoker = _Invoker(parent)  # parent=UI 物件 → 這個 invoker 會住在 UI thread
+
+    def _cleanup():
+        # 在主執行緒上收尾（避免在 worker thread 上關 thread）
+        try:
+            th.quit()
+            th.wait()
+        except Exception:
+            pass
+        finally:
+            th.deleteLater()
+
+    def _on_main_thread(ec: int, so: str, se: str):
+        # 一定在 UI thread 執行
         try:
             callback(ec, so, se)
         finally:
-            th.quit()
-            th.wait()
-            th.deleteLater()
+            # 延後一個事件循環再做釋放，保證 callback 內如有再開新任務也不會撞到
+            QTimer.singleShot(0, _cleanup)
 
-    worker.finished.connect(_done)
-    th.started.connect(worker.run)
+    # invoker 在主執行緒；把它連到真正要跑的 callback
+    invoker.sig.connect(_on_main_thread)
+
+    # worker 完成時（在 worker thread 發出 finished），改由 invoker 在主執行緒 emit
+    worker.finished.connect(lambda ec, so, se: invoker.sig.emit(ec, so, se))
+
+    # 啟動
+    def _start():
+        print(f"[NET] exec: {cmd}")
+        worker.run()
+
     print(f"[NET] $ {cmd}")
+    th.started.connect(_start)
     th.start()
 
 
@@ -752,14 +787,10 @@ class NetworkItem(QWidget):
         self.btn.setText("已連線" if ok else "連線")
 
 
-
 class NetworkOverlay(QWidget):
     """
-    網路設定頁（支援舊版 nmcli：不用 --separator，改用 -e yes 逃脫並在 Python 安全切欄位）
-    也修正：
-      - connected 一律轉 bool。
-      - 隱藏 SSID 容忍。
-      - 詳細 print log（前綴 [robotface-UI][NET]；由 SHOW_NET_DEBUG 控制）。
+    Wi-Fi 設定（無 awk 版）：所有 nmcli 輸出在 Python 內解析；強化掃描/逾時/診斷 log。
+    不改 UI。
     """
     def __init__(self, parent: QWidget):
         super().__init__(parent)
@@ -834,7 +865,6 @@ class NetworkOverlay(QWidget):
         self.lbl_status.setStyleSheet("background:transparent; color:#333; font-size:13px;")
         v.addWidget(self.lbl_status)
 
-        # Debug 區（僅在 SHOW_NET_DEBUG 時加入版面）
         self.lbl_debug = QLabel("")
         self.lbl_debug.setWordWrap(True)
         self.lbl_debug.setStyleSheet("background:transparent; color:#7a7a7a; font-size:12px;")
@@ -843,27 +873,16 @@ class NetworkOverlay(QWidget):
         else:
             self.lbl_debug.hide()
 
-        # 清單（可觸控 kinetic scroll） + 加粗捲軸
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("""
             QScrollArea { border:none; background:transparent; }
             QScrollArea > QWidget > QWidget { background:transparent; }
-
             QScrollBar:vertical {
-                width: 26px;
-                background: transparent;
-                margin: 6px 4px 6px 4px;
-                border-radius: 12px;
+                width: 26px; background: transparent; margin: 6px 4px 6px 4px; border-radius: 12px;
             }
-            QScrollBar::handle:vertical {
-                min-height: 40px;
-                border-radius: 12px;
-                background: rgba(0,0,0,0.22);
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(0,0,0,0.32);
-            }
+            QScrollBar::handle:vertical { min-height: 40px; border-radius: 12px; background: rgba(0,0,0,0.22); }
+            QScrollBar::handle:vertical:hover { background: rgba(0,0,0,0.32); }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
         """)
         self.list_container = QWidget()
@@ -873,13 +892,10 @@ class NetworkOverlay(QWidget):
         self.list_layout.setSpacing(8)
         scroll.setWidget(self.list_container)
 
-        # 觸控/滑鼠拖曳即可滑動（kinetic scroll）
         QScroller.grabGesture(scroll.viewport(), QScroller.TouchGesture)
         QScroller.grabGesture(scroll.viewport(), QScroller.LeftMouseButtonGesture)
-
         v.addWidget(scroll, 1)
 
-        # 常駐 loading（不 delete，只 show/hide）
         self.loading = QLabel(self.list_container)
         self.loading.setAlignment(Qt.AlignCenter)
         self.loading.setStyleSheet("background:transparent; color:#666;")
@@ -888,7 +904,7 @@ class NetworkOverlay(QWidget):
             self.loading.setMovie(self.loading_movie)
             self.loading_movie.setScaledSize(QSize(96, 96))
 
-        tip = QLabel("提示：若未找到 Wi-Fi，請確認 NetworkManager（nmcli）已啟用；勿與 wpa_supplicant/connman 衝突。")
+        tip = QLabel("提示：若未找到 Wi-Fi，請確認 NetworkManager（nmcli）啟用、rfkill 未封鎖，且 iface 有被管理。")
         tip.setWordWrap(True)
         tip.setStyleSheet("background:transparent; color:#666; font-size:12px;")
         v.addWidget(tip)
@@ -898,37 +914,33 @@ class NetworkOverlay(QWidget):
 
         QTimer.singleShot(100, self.refresh)
 
-    # ---- Log helper（受 SHOW_NET_DEBUG 控制） ----
+    # ---------- log helpers ----------
     def _log(self, *args):
         if SHOW_NET_DEBUG:
             print("[robotface-UI][NET]", *args, flush=True)
 
-    # ---- 文字工具：nmcli 嚴格 split（處理 \: 與 \\） ----
+    def _set_debug(self, text: str):
+        if SHOW_NET_DEBUG:
+            self.lbl_debug.setText(text or "")
+
+    def _remember(self, cmd: str):
+        if SHOW_NET_DEBUG:
+            self._debug_last_cmds.append(cmd)
+
     @staticmethod
     def _split_nmcli(line: str) -> List[str]:
-        """把 nmcli -t -e yes 用 ':' 分隔的行，做成欄位；支援 '\:' 與 '\\' 轉義。"""
-        out = []
-        buf = []
-        esc = False
+        out, buf, esc = [], [], False
         for ch in line:
             if esc:
-                if ch in [':', '\\']:
-                    buf.append(ch)
-                else:
-                    buf.append(ch)
-                esc = False
+                buf.append(ch); esc = False
             else:
-                if ch == '\\':
-                    esc = True
-                elif ch == ':':
-                    out.append(''.join(buf))
-                    buf = []
-                else:
-                    buf.append(ch)
+                if ch == '\\': esc = True
+                elif ch == ':': out.append(''.join(buf)); buf = []
+                else: buf.append(ch)
         out.append(''.join(buf))
         return out
 
-    # ---- Overlay lifecycle ----
+    # ---------- lifecycle ----------
     def show_overlay(self):
         self.setVisible(True)
         self.raise_()
@@ -940,7 +952,7 @@ class NetworkOverlay(QWidget):
     def resizeEvent(self, _):
         self.setGeometry(0, 0, self.parent().width(), self.parent().height())
 
-    # ---- 掃描流程 ----
+    # ---------- flow ----------
     def refresh(self):
         if self._is_scanning:
             return
@@ -952,45 +964,51 @@ class NetworkOverlay(QWidget):
         self._toast("正在掃描 Wi-Fi…")
         self._log("=== refresh ===")
 
-        # 取第一個 wifi 裝置（先 connected，再 disconnected）
-        cmd_dev = r"""nmcli -t -f DEVICE,TYPE,STATE dev | awk -F: '($2=="wifi" && $1 !~ /p2p/ && ($3=="connected" || $3=="disconnected")){print $1; exit}'"""
-        self._remember(cmd_dev)
-        self._log("$", cmd_dev)
+        # (A) 先列出裝置（無 awk）
+        cmd_dev = "nmcli -t -e yes -f DEVICE,TYPE,STATE dev status"
+        self._remember(cmd_dev); self._log("$", cmd_dev)
         run_cmd_async(self, cmd_dev, self._on_device, timeout=5.0)
 
-        QTimer.singleShot(10000, self._scan_timeout_guard)  # 10 秒超時
+        # (Z) 設置逾時守門員
+        QTimer.singleShot(12000, self._scan_timeout_guard)  # 12s
+
+    def _pick_wifi_if(self, text: str) -> str:
+        cand_connected, cand_disconnected = "", ""
+        for ln in (text or "").splitlines():
+            parts = self._split_nmcli(ln.strip())
+            if len(parts) < 3: continue
+            dev, typ, state = parts[0], parts[1], parts[2]
+            if typ != "wifi": continue
+            if "p2p" in dev:  # 排除 P2P
+                continue
+            if "connected" in state:
+                cand_connected = dev
+            elif "disconnected" in state and not cand_connected:
+                cand_disconnected = dev
+        return cand_connected or cand_disconnected
 
     def _on_device(self, ec, out, err):
-        self._log("exec: device → ec=", ec, "stdout:\n"+(out or ""), "stderr:\n"+(err or ""))
-        self._current_dev = out.strip() if (ec == 0 and out and out.strip()) else ""
+        self._log("device ec=", ec, "stdout:\n"+(out or ""), "stderr:\n"+(err or ""))
+        self._current_dev = self._pick_wifi_if(out if ec == 0 else "")
         self._log("device picked:", self._current_dev or "(none)")
 
-        # 目前連線的 SSID（不用 --separator；改自己 split）
-        cmd_cur = r"""nmcli -t -e yes -f ACTIVE,SSID dev wifi"""
-        self._remember(cmd_cur)
-        self._log("$", cmd_cur)
+        # (B) 目前連線 SSID
+        cmd_cur = "nmcli -t -e yes -f ACTIVE,SSID dev wifi"
+        self._remember(cmd_cur); self._log("$", cmd_cur)
         run_cmd_async(self, cmd_cur, self._on_current, timeout=4.0)
 
-        # 先 rescan（有介面就帶 ifname）
-        if self._current_dev:
-            cmd_rescan = f"nmcli dev wifi rescan ifname {nmcli_quote(self._current_dev)}"
-        else:
-            cmd_rescan = "nmcli dev wifi rescan"
-        self._remember(cmd_rescan)
-        self._log("$", cmd_rescan)
-        run_cmd_async(self, cmd_rescan, self._after_rescan, timeout=5.0)
+        # (C) 先 rescan（能指定 ifname 就指定）
+        cmd_rescan = f"nmcli dev wifi rescan ifname {nmcli_quote(self._current_dev)}" if self._current_dev else "nmcli dev wifi rescan"
+        self._remember(cmd_rescan); self._log("$", cmd_rescan)
+        run_cmd_async(self, cmd_rescan, self._after_rescan, timeout=7.0)
 
     def _on_current(self, ec, out, err):
         cur = ""
         if ec == 0 and out is not None:
             for ln in out.splitlines():
-                ln = ln.strip()
-                if not ln:
-                    continue
-                parts = self._split_nmcli(ln)
+                parts = self._split_nmcli(ln.strip())
                 if len(parts) >= 2 and parts[0] == "yes":
-                    cur = parts[1]
-                    break
+                    cur = parts[1]; break
         self.lbl_status.setText(f"目前連線：{cur}" if cur else "目前連線：無")
         self._log("current SSID ec=", ec, "→", repr(cur), "err=", err or "")
 
@@ -999,21 +1017,23 @@ class NetworkOverlay(QWidget):
         def _list():
             base = "nmcli -t -e yes -f IN-USE,SSID,SECURITY,SIGNAL dev wifi list"
             cmd_list = f'{base} ifname {nmcli_quote(self._current_dev)}' if self._current_dev else base
-            self._remember(cmd_list)
-            self._log("$", cmd_list)
-            run_cmd_async(self, cmd_list, self._on_scan_first, timeout=6.0)
-        QTimer.singleShot(1200, _list)  # 硬體掃描緩衝
+            self._remember(cmd_list); self._log("$", cmd_list)
+            run_cmd_async(self, cmd_list, self._on_scan_first, timeout=8.0)
+        QTimer.singleShot(1200, _list)
 
     def _on_scan_first(self, ec, out, err):
         lines = [ln for ln in (out or "").splitlines() if ln.strip()]
         self._log("list#1 ec=", ec, "nlines=", len(lines), "err=", err or "")
-        # 若只列出 1 筆或更少，再做一次不指定 ifname 的 list 合併
         if ec == 0 and len(lines) < 2:
+            # 第二次不指定 ifname 再掃一次，合併
             cmd_scan2 = "nmcli -t -e yes -f IN-USE,SSID,SECURITY,SIGNAL dev wifi list"
             primary_out = out or ""
-            self._remember(cmd_scan2)
-            self._log("$", cmd_scan2)
-            run_cmd_async(self, cmd_scan2, lambda e2, o2, s2: self._on_scan_merge(primary_out=primary_out, ec=e2, out=o2, err=s2), timeout=6.0)
+            self._remember(cmd_scan2); self._log("$", cmd_scan2)
+            run_cmd_async(
+                self, cmd_scan2,
+                lambda e2, o2, s2: self._on_scan_merge(primary_out=primary_out, ec=e2, out=o2, err=s2),
+                timeout=8.0
+            )
         else:
             self._on_scan(ec, out, err)
 
@@ -1028,12 +1048,38 @@ class NetworkOverlay(QWidget):
         self._on_scan(0 if merged else ec, "\n".join(merged), err)
 
     def _scan_timeout_guard(self):
-        if self._is_scanning:
-            self._is_scanning = False
-            self._show_loading(False)
-            self._set_debug("掃描逾時。")
-            self._toast("掃描逾時，已停止等待。可以再按「重新整理」。", ms=2200)
-            self._log("TIMEOUT: scan")
+        if not self._is_scanning:
+            return
+        self._is_scanning = False
+        self._show_loading(False)
+        self._toast("掃描逾時。已停止等待。", ms=2200)
+        self._log("TIMEOUT: scan")
+        # 自動跑診斷（貼在 console 與 debug 區）
+        self._run_diag_bundle()
+
+    def _run_diag_bundle(self):
+        cmds = [
+            "nmcli -v",
+            "nmcli general status",
+            "nmcli radio all",
+            "nmcli dev status",
+            "rfkill list",
+            "ip link",
+            "iw dev",
+            "nmcli -t -e yes -f IN-USE,SSID,SECURITY,SIGNAL dev wifi list",
+        ]
+        out_lines = []
+        def _mk_cb(title):
+            def _cb(ec, so, se):
+                out_lines.append(f"$ {title}\n# ec={ec}\n{so}\n{se}\n")
+                if len(out_lines) == len(cmds):
+                    blob = "\n".join(out_lines)
+                    self._log("=== DIAG ===\n" + blob)
+                    self._set_debug((self.lbl_debug.text() + "\n\n[診斷]\n" + blob)[:4000])
+            return _cb
+        for c in cmds:
+            self._remember(c); self._log("$", c)
+            run_cmd_async(self, c, _mk_cb(c), timeout=6.0)
 
     def _on_scan(self, ec, out, err):
         self._is_scanning = False
@@ -1042,47 +1088,37 @@ class NetworkOverlay(QWidget):
 
         if ec != 0:
             msg = (err or out or "").strip()
-            if "nmcli" in (err or "") and "not found" in (err.lower() if err else ""):
+            if "not found" in (err or "").lower():
                 msg = "找不到 nmcli，請先安裝 NetworkManager。"
             elif "device not managed" in ((out or "") + (err or "")).lower():
-                msg = "Wi-Fi 裝置未由 NetworkManager 管理。"
+                msg = "Wi-Fi 介面未由 NetworkManager 管理（unmanaged）。"
             self._set_debug(f"掃描失敗：{msg}")
             self._toast(f"掃描失敗：{msg or '未知錯誤'}", ms=2800)
             self._log("scan FAILED:", msg)
             return
 
         current = self._current_ssid_text()
-        items = []
-        seen = set()
+        items, seen = [], set()
 
         for ln in (out or "").splitlines():
             parts = self._split_nmcli(ln)
             if len(parts) < 4:
-                # 容錯：再嘗試傳統 split（某些老舊 nmcli 可能沒 escape）
                 parts = ln.split(":")
-                if len(parts) < 4:
-                    continue
-
+                if len(parts) < 4: continue
             inuse = (parts[0].strip() == "*")
-            ssid = (parts[1] or "").strip()           # 允許空字串（隱藏 SSID）
-            sec  = (parts[2] or "--").strip()
-            try:
-                sig = int((parts[3] or "0").strip())
-            except Exception:
-                sig = 0
-
+            ssid  = (parts[1] or "").strip()
+            sec   = (parts[2] or "--").strip()
+            try: sig = int((parts[3] or "0").strip())
+            except: sig = 0
             key = (ssid, sec)
-            if key in seen:
-                continue
+            if key in seen: continue
             seen.add(key)
-
-            connected = bool(inuse or (ssid == current and ssid != ""))
+            connected = bool(inuse or (ssid and ssid == current))
             item = NetworkItem(
                 ssid=ssid, security=sec, signal=sig, connected=connected,
                 on_connect=self._connect_flow, on_disconnect=self._disconnect_flow
             )
-            self.list_layout.addWidget(item)
-            items.append(item)
+            self.list_layout.addWidget(item); items.append(item)
 
         preview = ", ".join([(it.ssid or "(隱藏)") for it in items[:6]])
         self._set_debug(
@@ -1090,10 +1126,10 @@ class NetworkOverlay(QWidget):
             (f"；前幾個：{preview}" if items else "") +
             ("\n指令：\n" + "\n".join(f"- {c}" for c in self._debug_last_cmds))
         )
-        self._log("summary ->\n" + self.lbl_debug.text())
+        self._log("summary ->\n" + (self.lbl_debug.text() or ""))
 
         if not items:
-            hint = QLabel("找不到 Wi-Fi 熱點。可能無無線介面或被其他程式佔用。")
+            hint = QLabel("找不到 Wi-Fi 熱點。可能無無線介面、被 rfkill 封鎖，或未由 NetworkManager 管理。")
             hint.setStyleSheet("background:transparent; color:#444; font-weight:600;")
             self.list_layout.addWidget(hint)
 
@@ -1101,71 +1137,50 @@ class NetworkOverlay(QWidget):
             self._tail_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
         self.list_layout.addItem(self._tail_spacer)
 
-    # ---- UI 輔助 ----
+    # ---------- UI helpers ----------
     def _clear_list(self):
-        if not self.list_layout:
-            return
+        if not self.list_layout: return
         for i in reversed(range(self.list_layout.count())):
             it = self.list_layout.takeAt(i)
             w = it.widget()
-            if w is None:
-                continue
-            if w is self.loading:
-                self.loading.hide()
-            else:
-                w.deleteLater()
+            if w is None: continue
+            if w is self.loading: self.loading.hide()
+            else: w.deleteLater()
 
     def _show_loading(self, on: bool):
         if on:
-            if self.loading_movie:
-                self.loading_movie.start()
-            else:
-                self.loading.setText("掃描中…")
+            if self.loading_movie: self.loading_movie.start()
+            else: self.loading.setText("掃描中…")
             already = any(self.list_layout.itemAt(i).widget() is self.loading
                           for i in range(self.list_layout.count()))
             if not already:
                 self.list_layout.insertWidget(0, self.loading, alignment=Qt.AlignCenter)
             self.loading.show()
         else:
-            if self.loading_movie:
-                self.loading_movie.stop()
+            if self.loading_movie: self.loading_movie.stop()
             self.loading.hide()
 
     def _current_ssid_text(self) -> str:
         t = self.lbl_status.text()
         return t.split("：", 1)[-1].strip() if "：" in t else ""
 
-    # 這三個方法會在 SHOW_NET_DEBUG=False 時什麼都不做
-    def _set_debug(self, text: str):
-        if SHOW_NET_DEBUG:
-            self.lbl_debug.setText(text or "")
-
-    def _remember(self, cmd: str):
-        if SHOW_NET_DEBUG:
-            self._debug_last_cmds.append(cmd)
-
-    # ---- 連線 / 斷線 ----
+    # ---------- connect / disconnect ----------
     def _connect_flow(self, item: NetworkItem):
         ssid = item.ssid or ""
         if ssid == "":
-            self._toast("此 AP 為隱藏 SSID，暫不支援。", ms=2200)
-            return
-
+            self._toast("此 AP 為隱藏 SSID，暫不支援。", ms=2200); return
         if item.security and item.security.lower() not in ("--", "none"):
             kb = VirtualKeyboardDialog(self, f"連線到「{ssid}」")
-            if kb.exec() != QDialog.Accepted:
-                return
+            if kb.exec() != QDialog.Accepted: return
             pw = kb.get_text()
-            if not pw:
-                self._toast("未輸入密碼。", ms=1500); return
+            if not pw: self._toast("未輸入密碼。", ms=1500); return
             self._toast("嘗試連線中…")
             cmd = f"nmcli dev wifi connect {nmcli_quote(ssid)} password {nmcli_quote(pw)}"
         else:
             self._toast("嘗試連線中…")
             cmd = f"nmcli dev wifi connect {nmcli_quote(ssid)}"
-        self._remember(cmd)
-        self._log("$", cmd)
-        run_cmd_async(self, cmd, lambda ec, out, err: self._on_connect_result(ec, out, err, item), timeout=12.0)
+        self._remember(cmd); self._log("$", cmd)
+        run_cmd_async(self, cmd, lambda ec, out, err: self._on_connect_result(ec, out, err, item), timeout=15.0)
 
     def _on_connect_result(self, ec, out, err, item: NetworkItem):
         self._log("connect ec=", ec, "out=", out or "", "err=", err or "")
@@ -1181,21 +1196,14 @@ class NetworkOverlay(QWidget):
         if self._current_dev:
             cmd = f"nmcli dev disconnect {nmcli_quote(self._current_dev)}"
         else:
-            # 用普通字串相鄰拼接，awk 內的雙引號用 \"，避免 Python 字串被破壞
-            cmd = (
-                "nmcli -t -f DEVICE,TYPE dev status | "
-                "awk -F: '$2==\"wifi\"{print $1; exit}' | "
-                "xargs -r -n1 -I{} nmcli dev disconnect {}"
-            )
-        self._remember(cmd)
-        self._log("$", cmd)
+            cmd = "nmcli -t -e yes -f DEVICE,TYPE dev status | awk -F: '$2==\"wifi\"{print $1; exit}' | xargs -r -n1 -I{} nmcli dev disconnect {}"
+        self._remember(cmd); self._log("$", cmd)
         run_cmd_async(self, cmd, self._on_disconnected, timeout=8.0)
 
     def _on_disconnected(self, ec, out, err):
         self._log("disconnect ec=", ec, "out=", out or "", "err=", err or "")
         if ec == 0:
-            self._toast("已斷線", ms=1600)
-            self.refresh()
+            self._toast("已斷線", ms=1600); self.refresh()
         else:
             self._toast(err or "斷線失敗", ms=2400)
 
