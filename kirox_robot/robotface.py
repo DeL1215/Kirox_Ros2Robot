@@ -1330,8 +1330,18 @@ class RobotFaceNode(Node):
         self.create_subscription(RosString, "face/animation", self._on_anim, 10)
         self.create_subscription(RosBool,   "face/speaking",  self._on_speaking, 10)
 
-        self.setting_mode_pub = self.create_publisher(RosBool, "system/setting_mode", 10)
-        self.reload_pub       = self.create_publisher(RosBool, "system/reload_config", 10)
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+        latched_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+
+        self.setting_mode_pub = self.create_publisher(RosBool, "system/setting_mode", latched_qos)
+        self.reload_pub       = self.create_publisher(RosBool, "system/reload_config", latched_qos)
+
 
         self.ui.btn.clicked.connect(lambda: self._toggle_settings(True))
         self.ui._on_overlay_back = lambda: self._toggle_settings(False)
@@ -1372,8 +1382,11 @@ class RobotFaceNode(Node):
         self._toggle_settings(False)
 
     def _action_network(self):
-        self._toggle_settings(False)
+        # 設定模式仍保持啟用
+        self.setting_mode_pub.publish(RosBool(data=True))
+        self.ui.overlay.hide_overlay()
         self.ui.net_overlay.show_overlay()
+
 
     def _action_dev_exit(self):
         self.get_logger().warn("[DevMode] 將結束所有 ROS2 相關進程並退出")
