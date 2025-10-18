@@ -36,15 +36,13 @@ ps -eo pid,user,comm,%mem,%cpu,etime --sort=-%mem | head -n 25
 # 互動監看
 top            # or 安裝 htop：sudo apt install htop && htop
 
-| 功能         | 指令                                                  | 說明                                    |
-| ---------- | --------------------------------------------------- | ------------------------------------- |
-| 🔍 檢查狀態    | `systemctl --user status kirox_robot_gui.service`   | 顯示目前服務狀態（是否啟動、最後錯誤訊息等）                |
-| 📜 即時查看日誌  | `journalctl --user -u kirox_robot_gui.service -f`   | 追蹤 systemd 的即時輸出（Ctrl+C 停止）           |
-| 📄 查看自訂日誌檔 | `tail -f ~/kirox_gui.log`                           | 看你的腳本自己輸出的 log 檔內容（持續更新）              |
-| ▶️ 啟動服務    | `systemctl --user start kirox_robot_gui.service`    | 手動啟動（通常開機後會自動啟動）                      |
-| ⏹ 停止服務     | `systemctl --user stop kirox_robot_gui.service`     | 手動關閉服務                                |
-| 🔁 重新啟動    | `systemctl --user restart kirox_robot_gui.service`  | 關閉再重新啟動（修改完腳本後常用）                     |
-| 🔓 啟用自動啟動  | `systemctl --user enable kirox_robot_gui.service`   | 開機時自動啟動（設定一次即可）                       |
-| 🔒 停用自動啟動  | `systemctl --user disable kirox_robot_gui.service`  | 關機後不再自動啟動                             |
-| 🧹 重新載入設定  | `systemctl --user daemon-reload`                    | 修改 `.service` 檔後要執行一次讓 systemd 重新讀取設定 |
-| 🗑 移除服務檔   | `rm ~/.config/systemd/user/kirox_robot_gui.service` | 刪除使用者服務檔（刪完再 `daemon-reload`）         |
+檢查狀態：systemctl --user status kirox.service
+
+啟動 / 停止 / 重啟：
+systemctl --user start kirox.service
+systemctl --user stop kirox.service
+systemctl --user restart kirox.service
+
+追 systemd 日誌：journalctl --user -u kirox.service -f
+
+停用自動啟動：systemctl --user disable kirox.service
