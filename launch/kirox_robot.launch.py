@@ -17,15 +17,6 @@ def generate_launch_description():
         video_device_arg,
 
         Node(package='kirox_robot', executable='robotbrain', name='robotbrain'),
-
-        Node(
-            package='kirox_robot',
-            executable='robotface',
-            name='robotface',
-            output='screen',
-            additional_env={'QT_QPA_PLATFORM': 'xcb'}
-        ),
-
         Node(package='kirox_robot', executable='roboteyes', name='roboteyes'),
         Node(package='kirox_robot', executable='robotbody', name='robotbody'),
         Node(package='kirox_robot', executable='robotears', name='robotears'),
@@ -36,5 +27,12 @@ def generate_launch_description():
             executable='camera',
             name='camera',
             parameters=[{'device': LaunchConfiguration('video_device')}]
+        ),
+        Node(
+            package='kirox_robot',
+            executable='robotface',
+            name='robotface',
+            output='screen',
+            additional_env={'QT_QPA_PLATFORM': 'xcb'}
         ),
     ])
