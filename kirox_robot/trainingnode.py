@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 # 僅保留四欄：三個分數 + 輸出(0/1)
-CSV_PATH = "datasets/tri_scores.csv"
+CSV_PATH = "/home/jetson/ros2_ws/src/Kirox_Ros2Robot/kirox_robot/logreg/tri_scores.csv"
 
 
 class SimpleProbe(Node):

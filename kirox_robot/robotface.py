@@ -59,7 +59,7 @@ ICONS = {
 # ---------- 動畫可調 ----------
 ANIM_MAP: Dict[str, Tuple[Optional[Path], float, Optional[Tuple[int,int]], Tuple[int,int]]] = {
     "empty":   (None,                 1.0, None,        (0, 0)),
-    "loading": (ASSETS/"Loading.gif", 0.9, (150, 150),  (0, 0)),
+    "loading": (ASSETS/"EmojiThinking.gif", 0.9, (300, 300),  (0, 0)),
     "loading2": (ASSETS/"Loading2.gif", 0.9, (40, 40),  (0, 0)),
     "idle":    (ASSETS/"Todo.gif",    1.0, None,        (0, 0)),
     "happy":   (ASSETS/"Todo.gif",    1.2, (420, 420),  (0,-40)),

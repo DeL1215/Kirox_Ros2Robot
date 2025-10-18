@@ -11,11 +11,28 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from ament_index_python.packages import get_package_share_directory
 
 from std_msgs.msg import String, Float32, Bool
-from kirox_robot.logreg.train import LogisticRegression
 
 # --- 推理用（與訓練相同結構） ---
+import numpy as np
 import torch
 import torch.nn as nn
+
+
+# ---------------- 模型定義（與 train.py 一致） ----------------
+class SimpleNN(nn.Module):
+    def __init__(self):
+        super(SimpleNN, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 16),
+            nn.ReLU(),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()  # 二元分類機率輸出
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
 class RobotBrainNode(Node):
@@ -32,26 +49,19 @@ class RobotBrainNode(Node):
     def __init__(self):
         super().__init__('robot_brain_node')
 
-        # 取得套件分享目錄，以建立模型檔案的絕對路徑
-        package_share_dir = get_package_share_directory('kirox_robot')
-        default_model_path = os.path.join(package_share_dir, 'models', 'logreg_model.pth')
+        # ---------------- 直接抓共享資料夾（無需啟動參數） ----------------
+        pkg_share = get_package_share_directory('kirox_robot')
+        models_dir = os.path.join(pkg_share, 'models')
+        self.model_path  = os.path.join(models_dir, 'logreg_model_v2.best.pth')
+        self.scaler_path = os.path.join(models_dir, 'scaler.json')
+        self.config_path = os.path.join(models_dir, 'config.json')
 
-        # 參數
-        self.declare_parameter('model_path', default_model_path)
-        self.declare_parameter('threshold', 0.5)
-
-        self.model_path: str = self.get_parameter('model_path').get_parameter_value().string_value
-        th_param = self.get_parameter('threshold').get_parameter_value()
-        self.threshold: float = float(
-            getattr(th_param, 'double_value', 0.5) or getattr(th_param, 'integer_value', 0.5)
-        )
-
-        # 狀態（最新分數）
+        # ---------------- 狀態（最新分數） ----------------
         self.vision_score: Optional[float] = None
         self.vad_score: Optional[float] = None
         self.oww_score: Optional[float] = None
 
-        # QoS（latched）
+        # ---------------- QoS（latched） ----------------
         latched_qos = QoSProfile(
             depth=1,
             history=HistoryPolicy.KEEP_LAST,
@@ -59,24 +69,31 @@ class RobotBrainNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        # 訂閱分數
+        # ---------------- 訂閱分數/事件 ----------------
         self.create_subscription(Float32, 'vision/q_bar_score', self._on_qbar, latched_qos)
         self.create_subscription(String,  'ears/vad_score',     self._on_vad_score, latched_qos)
         self.create_subscription(Float32, 'ears/oww_score',     self._on_oww_score, latched_qos)
-        # 事件
         self.create_subscription(String,  'ears/vad_end',       self._on_vad_end, 10)
 
-        # 輸出
+        # ---------------- 輸出 ----------------
         self.prob_pub    = self.create_publisher(Float32, 'tri/prob', 10)
         self.pred_pub    = self.create_publisher(Bool,    'tri/pred', 10)
         self.trigger_pub = self.create_publisher(Bool,    'brain/triggered', 10)
-        self.face_pub    = self.create_publisher(String,  'face/animation', 10)  # ★ 新增
+        self.face_pub    = self.create_publisher(String,  'face/animation', 10)
 
-        # 載入模型
-        self.model = self._load_model(self.model_path)
+        # ---------------- 載入模型/標準化/閾值 ----------------
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model, self.mu, self.sigma, self.threshold = self._load_all()
         self.model.eval()
 
-        self.get_logger().info(f'tri_inference 啟動，使用模型：{self.model_path}，threshold={self.threshold:g}')
+        self.get_logger().info(
+            f'tri_inference 啟動：\n'
+            f'  model= {self.model_path}\n'
+            f'  scaler={self.scaler_path}\n'
+            f'  config={self.config_path}\n'
+            f'  threshold={self.threshold:g}\n'
+            f'  device={self.device}'
+        )
 
     # ---- Callbacks ----
     def _on_qbar(self, msg: Float32):
@@ -95,13 +112,17 @@ class RobotBrainNode(Node):
         self.oww_score = float(msg.data)
 
     def _on_vad_end(self, msg: String):
+        # 三分數齊備才推理
         if self.vision_score is None or self.vad_score is None or self.oww_score is None:
             self.get_logger().warn(
                 f'分數不足，略過推理：vision={self.vision_score} vad={self.vad_score} oww={self.oww_score}'
             )
             return
 
-        x = torch.tensor([[self.vision_score, self.vad_score, self.oww_score]], dtype=torch.float32)
+        # 形成輸入，套用標準化
+        tri = np.array([self.vision_score, self.vad_score, self.oww_score], dtype=np.float32)
+        tri_std = (tri - self.mu) / self.sigma
+        x = torch.tensor(tri_std[None, :], dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             prob = float(self.model(x).item())
@@ -112,7 +133,7 @@ class RobotBrainNode(Node):
         self.pred_pub.publish(Bool(data=pred))
         self.trigger_pub.publish(Bool(data=pred))
 
-        # ★ 如果 pred==1，送出 face/animation = "loading"
+        # 若 pred==1，同步驅動表情
         if pred:
             self.face_pub.publish(String(data="loading"))
             self.get_logger().info("pred==1 → 發佈 face/animation = 'loading'")
@@ -123,14 +144,37 @@ class RobotBrainNode(Node):
         )
 
     # ---- Helpers ----
-    def _load_model(self, model_path: str) -> nn.Module:
-        model = LogisticRegression()
-        if not os.path.exists(model_path):
-            self.get_logger().error(f'模型檔不存在：{model_path}')
-            raise FileNotFoundError(model_path)
-        state = torch.load(model_path, map_location='cpu')
+    def _load_all(self):
+        # 1) 載入模型權重
+        if not os.path.exists(self.model_path):
+            self.get_logger().error(f'模型檔不存在：{self.model_path}')
+            raise FileNotFoundError(self.model_path)
+
+        model = SimpleNN().to(self.device)
+        state = torch.load(self.model_path, map_location=self.device)
         model.load_state_dict(state)
-        return model
+
+        # 2) 載入標準化參數
+        if not os.path.exists(self.scaler_path):
+            self.get_logger().error(f'找不到 scaler.json：{self.scaler_path}')
+            raise FileNotFoundError(self.scaler_path)
+
+        with open(self.scaler_path, "r") as f:
+            s = json.load(f)
+        mu = np.array(s["mu"], dtype=np.float32)
+        sigma = np.array(s["sigma"], dtype=np.float32)
+        sigma[sigma == 0] = 1.0  # 防零除
+
+        # 3) 載入最佳閾值（config 不存在則預設 0.5）
+        if not os.path.exists(self.config_path):
+            self.get_logger().warn(f'找不到 config.json：{self.config_path}，改用預設 0.5 閾值')
+            best_thr = 0.5
+        else:
+            with open(self.config_path, "r") as f:
+                cfg = json.load(f)
+            best_thr = float(cfg.get("best_threshold", 0.5))
+
+        return model, mu, sigma, best_thr
 
 
 def main():
