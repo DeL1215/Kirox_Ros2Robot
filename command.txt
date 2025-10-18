@@ -43,6 +43,6 @@ systemctl --user start kirox.service
 systemctl --user stop kirox.service
 systemctl --user restart kirox.service
 
-追 systemd 日誌：journalctl --user -u kirox.service -f
+追 systemd 日誌：tail -f ~/kirox_gui.log
 
 停用自動啟動：systemctl --user disable kirox.service
