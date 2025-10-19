@@ -1,0 +1,11 @@
+numpy
+pandas
+torch
+sounddevice
+openwakeword-onnx
+websockets
+requests
+PySide6
+opencv-python
+cv-bridge
+insightface

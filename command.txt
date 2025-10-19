@@ -1,0 +1,54 @@
+source ~/venvs/ros2/bin/activate
+source /opt/ros/humble/setup.bash
+export PYTHONNOUSERSITE=1
+
+cd ~/ros2_ws
+rm -rf build install log
+python -m colcon build --symlink-install --event-handlers console_direct+
+
+head -n1 install/kirox_robot/lib/kirox_robot/robotface
+
+source install/setup.bash
+
+ros2 launch kirox_robot kirox_robot.launch.py
+
+ros2 run kirox_robot robotbrain
+
+
+
+# 【重要】執行 launch 前，請確保：
+# 1. 你是在 Jetson 的桌面環境中開啟的終端機。
+# 2. 如果你是透過 SSH 連線，請使用 `ssh -X user@jetson_ip` 來啟用 X11 轉發，
+#    這樣 GUI 視窗 (robotface) 才能顯示在你的電腦上。
+
+
+# torch 系列安裝
+pip install --no-cache-dir --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+  torch torchvision torchaudio
+
+
+# 依 CPU 由高到低
+ps -eo pid,user,comm,%cpu,%mem,etime --sort=-%cpu | head -n 25
+
+# 依記憶體由高到低
+ps -eo pid,user,comm,%mem,%cpu,etime --sort=-%mem | head -n 25
+
+# 互動監看
+top            # or 安裝 htop：sudo apt install htop && htop
+
+檢查狀態：systemctl --user status kirox.service
+
+啟動 / 停止 / 重啟：
+systemctl --user start kirox.service
+systemctl --user stop kirox.service
+systemctl --user restart kirox.service
+
+追 systemd 日誌：tail -f ~/kirox_gui.log
+
+停用自動啟動：systemctl --user disable kirox.service
+
+
+serial test:
+
+sudo /home/jetson/venvs/ros2/bin/python /home/jetson/ros2_ws/src/Kirox_Ros2Robot/kirox_robot/serial_test.py
+
