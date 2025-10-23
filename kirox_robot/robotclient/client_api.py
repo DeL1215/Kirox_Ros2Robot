@@ -206,24 +206,40 @@ class AsyncWSClient:
         return True
 
     async def connect_forever(self):
+        """
+        永久保持連線，具備自動重連與指數回退（最大 15 秒）。
+        """
         backoff = 1.0
+        MAX_BACKOFF = 15.0
         while rclpy.ok():
             try:
-                self.node.get_logger().info(f"連線 {self.ws_url}…")
+                self.node.get_logger().info(f"嘗試連線 {self.ws_url} …")
                 async with websockets.connect(self.ws_url, max_size=None) as ws:
                     self._ws = ws
+                    # 握手
                     await ws.send(json.dumps(self.hello, ensure_ascii=False))
                     self.node.get_logger().info("[ws] handshake sent")
 
+                    # 成功後立即重置回退時間
+                    backoff = 1.0
+
+                    # 觸發連線成功回呼
                     if callable(self.on_connected):
                         try:
                             self.on_connected()
-                        except Exception:
-                            pass
+                        except Exception as cb_err:
+                            self.node.get_logger().warn(f"on_connected 回呼錯誤: {cb_err}")
 
+                    # 啟動背景任務
                     self._recv_task = asyncio.create_task(self._recv_loop(ws))
                     self._ping_task = asyncio.create_task(self._keepalive_loop(ws))
-                    await asyncio.gather(self._recv_task)
+
+                    # 等其中任一任務結束（例如 recv 因斷線而結束）
+                    await asyncio.wait(
+                        {self._recv_task, self._ping_task},
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+
             except Exception as e:
                 self.node.get_logger().warn(f"WS 斷線或錯誤：{e}")
             finally:
@@ -233,13 +249,14 @@ class AsyncWSClient:
                 if callable(self.on_disconnected):
                     try:
                         self.on_disconnected()
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_disconnected 回呼錯誤: {cb_err}")
                 self.node.get_logger().warn("[ws] disconnected")
 
             self.node.get_logger().warn(f"{backoff:.1f}s 後重連…")
             await asyncio.sleep(backoff)
-            backoff = min(30.0, max(1.0, backoff * 2))
+            # 指數回退但不超過 15 秒
+            backoff = min(MAX_BACKOFF, max(1.0, backoff * 2))
 
     def _stop_bg_tasks(self):
         for t in (self._recv_task, self._ping_task):
@@ -254,6 +271,7 @@ class AsyncWSClient:
             try:
                 await ws.send(json.dumps({"ping": int(time.time())}))
             except Exception:
+                # 送失敗表示連線可能已斷，讓外層感知
                 break
 
     async def _recv_loop(self, ws: websockets.WebSocketClientProtocol):
@@ -277,8 +295,8 @@ class AsyncWSClient:
                 if callable(self.on_play_start):
                     try:
                         self.on_play_start()
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_play_start 回呼錯誤: {cb_err}")
                 self._in_audio_fmt = (
                     d.get("audio_format", "pcm_s16le"),
                     int(d.get("sample_rate", 24000)),
@@ -293,14 +311,14 @@ class AsyncWSClient:
                 # 發佈 brain/text
                 try:
                     self.pub_text.publish(RosString(data=text))
-                except Exception:
-                    pass
+                except Exception as pub_err:
+                    self.node.get_logger().warn(f"publish brain/text 失敗: {pub_err}")
                 # 回呼
                 if callable(self.on_text):
                     try:
                         self.on_text(text)
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_text 回呼錯誤: {cb_err}")
                 else:
                     self.node.get_logger().info(f"[assistant] {text}")
                 continue
@@ -326,13 +344,13 @@ class AsyncWSClient:
                     else:
                         self.node.get_logger().warn(f"action 欄位不是 dict，收到: {action_payload}")
                 except Exception as e:
-                    self.node.get_logger().error(f"解析 action_payload 失敗: {e}")
+                    self.node.get_logger().error(f"解析/發佈 action_payload 失敗: {e}")
 
                 if callable(self.on_action):
                     try:
                         self.on_action(action_payload)
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_action 回呼錯誤: {cb_err}")
                 else:
                     self.node.get_logger().info(f"[assistant action] {action_payload}")
                 continue
@@ -342,8 +360,8 @@ class AsyncWSClient:
                 if callable(self.on_play_end):
                     try:
                         self.on_play_end()
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_play_end 回呼錯誤: {cb_err}")
                 continue
 
             # 錯誤
@@ -352,8 +370,8 @@ class AsyncWSClient:
                 if callable(self.on_play_end):
                     try:
                         self.on_play_end()
-                    except Exception:
-                        pass
+                    except Exception as cb_err:
+                        self.node.get_logger().warn(f"on_play_end 回呼錯誤: {cb_err}")
                 continue
 
     async def send_round(self, image_b64: Optional[str], wav_bytes: bytes, timeout: float) -> bool:
@@ -362,20 +380,22 @@ class AsyncWSClient:
           1) 可選圖：{"image": "<data-url or base64>"}
           2) 音訊 bytes （wav 容器）
           3) {"end": true}
-        成功則回 True，否則 False。此函式現在包含自己的超時控制。
+        成功則回 True，否則 False。此函式包含自己的超時控制。
         """
         try:
             # 使用 asyncio.wait_for 來包裹整個傳送操作
             return await asyncio.wait_for(self._do_send_round(image_b64, wav_bytes), timeout=timeout)
         except asyncio.TimeoutError:
             self.node.get_logger().error(f"傳送操作在 {timeout} 秒後超時。")
-            # 重新拋出 TimeoutError，讓上層的 on_round_done 能夠捕獲
+            # 重新拋出 TimeoutError，讓上層（例如 WSConnectionNode._on_round_done）能捕獲
             raise
         except Exception as e:
             self.node.get_logger().warn(f"送回合失敗：{e}")
             if callable(self.on_play_end):
-                try: self.on_play_end()
-                except Exception: pass
+                try:
+                    self.on_play_end()
+                except Exception:
+                    pass
             return False
 
     async def _do_send_round(self, image_b64: Optional[str], wav_bytes: bytes) -> bool:

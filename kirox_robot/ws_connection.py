@@ -31,7 +31,7 @@ class WSConnectionNode(Node):
         self.declare_parameter("keepalive_interval_sec", 20)
         self.declare_parameter("min_round_interval_sec", 1.0)
         self.declare_parameter("auto_enable_rec_after_done", True)
-        self.declare_parameter("round_timeout_sec", 90)  # 單回合上傳 + 等待伺服器回應的本地等待超時
+        self.declare_parameter("round_timeout_sec", 60)  # 單回合上傳 + 等待伺服器回應的本地等待超時
 
         # ---- 讀取參數 ----
         p = self.get_parameter
