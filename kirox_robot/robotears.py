@@ -98,7 +98,7 @@ class RobotEarsNode(Node):
         # ---- 偵測/計分（必要少量）----
         self.declare_parameter("frame_ms", 32)
         self.declare_parameter("start_prob", 0.48)   # 比 Conservative 再柔和一點
-        self.declare_parameter("end_prob", 0.42)
+        self.declare_parameter("end_prob", 0.8)
         self.declare_parameter("k_start", 3)
         self.declare_parameter("k_end", 9)
         self.declare_parameter("t_cap_s", 3.0)
@@ -114,7 +114,7 @@ class RobotEarsNode(Node):
         self.declare_parameter("w_o", 0.05)
         # ---- OWW ----
         package_share_dir = get_package_share_directory('kirox_robot')
-        default_oww_model_path = os.path.join(package_share_dir, 'models', 'kirox.onnx')
+        default_oww_model_path = os.path.join(package_share_dir, 'models', 'newkirox.onnx')
         self.declare_parameter("oww_model_path", default_oww_model_path)
         self.declare_parameter("oww_frame_ms", 80)
         self.declare_parameter("oww_threshold", 0.80)

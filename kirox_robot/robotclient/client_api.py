@@ -83,14 +83,23 @@ def create_instance(
 
 
 # -------------------- 播放器：串流 PCM -> 本地喇叭 --------------------
-
 class PCMPlayer:
-    """極簡 PCM 串流播放器：預設使用系統預設輸出裝置。"""
-    def __init__(self):
+    """帶自動增益 + 限幅 + 平滑的 PCM 串流播放器"""
+    def __init__(
+        self,
+        target_peak: float = 0.8,   # 目標峰值（0~1），0.8 ≈ 保留一點安全空間
+        max_gain: float = 4.0,      # 最大增益倍數（例如 4 倍 ≈ +12dB）
+        smooth: float = 0.7         # 平滑係數，越接近 1 變化越慢
+    ):
         self.stream: Optional[Any] = None
         self.sr: Optional[int] = None
         self.ch: Optional[int] = None
         self._lock = threading.Lock()
+
+        self.target_peak = float(target_peak)
+        self.max_gain = float(max_gain)
+        self.smooth = float(smooth)
+        self._current_gain = 1.0  # 起始增益
 
     def configure(self, sample_rate: int, channels: int = 1):
         if not _HAS_SD:
@@ -115,8 +124,37 @@ class PCMPlayer:
             if not self.stream:
                 # server 預設 24k/mono
                 self.configure(24000, 1)
-            arr = np.frombuffer(pcm_bytes, dtype=np.int16)
-            frames = arr if self.ch == 1 else arr.reshape(-1, self.ch)
+
+            # 1) int16 -> float32
+            arr = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+
+            # 2) 計算目前 chunk 的峰值
+            peak = float(np.max(np.abs(arr))) if arr.size > 0 else 0.0
+
+            if peak > 0.0:
+                # 3) 算出如果要達到 target_peak*32767，要乘幾倍
+                ideal_gain = (self.target_peak * 32767.0) / peak
+                # 4) 限制最大增益
+                ideal_gain = min(ideal_gain, self.max_gain)
+            else:
+                # 完全靜音的 chunk，就維持原本增益
+                ideal_gain = self._current_gain
+
+            # 5) 平滑增益：避免一下子變太多
+            self._current_gain = (
+                self.smooth * self._current_gain
+                + (1.0 - self.smooth) * ideal_gain
+            )
+
+            # 6) 套用增益
+            if self._current_gain != 1.0:
+                arr *= self._current_gain
+
+            # 7) 限幅到 int16 範圍，避免爆掉變成雜音
+            np.clip(arr, -32768.0, 32767.0, out=arr)
+            arr_int16 = arr.astype(np.int16)
+
+            frames = arr_int16 if self.ch == 1 else arr_int16.reshape(-1, self.ch)
             self.stream.write(frames)
 
     def _close_locked(self):
@@ -174,7 +212,12 @@ class AsyncWSClient:
         self._recv_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
         self._send_lock = asyncio.Lock()
-        self._player = PCMPlayer()
+        self._player = PCMPlayer(
+            target_peak=0.9,  # 讓輸出盡量貼近滿振幅
+            max_gain=4.0,     # 最多放大 4 倍
+            smooth=0.8        # 增益變化慢一點，聽起來比較穩
+        )
+
         self._in_audio_fmt: Optional[tuple[str, int, int]] = None  # (fmt, sr, ch)
 
         # ROS 發佈器
