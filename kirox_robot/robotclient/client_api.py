@@ -432,11 +432,13 @@ class AsyncWSClient:
 
                             # Action 推給 body/action
                             if action_value is not None:
-                                action_str = (
-                                    json.dumps(action_value, ensure_ascii=False)
-                                    if isinstance(action_value, (dict, list))
-                                    else str(action_value)
-                                )
+                                # 這裡統一包成 {type:"action", content:<動作JSON>}
+                                # content 直接放原本的 action_value (list/dict/其他)
+                                envelope = {
+                                    "type": "action",
+                                    "content": action_value
+                                }
+                                action_str = json.dumps(envelope, ensure_ascii=False)
                                 self.pub_action.publish(RosString(data=action_str))
                         else:
                             self.node.get_logger().warn(
@@ -449,12 +451,14 @@ class AsyncWSClient:
 
                     if callable(self.on_action):
                         try:
+                            # 回呼仍然維持用原始的 action_payload
                             self.on_action(action_payload)
                         except Exception as cb_err:
                             self.node.get_logger().warn(f"on_action 回呼錯誤: {cb_err}")
                     else:
                         self.node.get_logger().info(f"[assistant action] {action_payload}")
                     continue
+
 
                 # 一回合結束
                 if d.get("done") is True:

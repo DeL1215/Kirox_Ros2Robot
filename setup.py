@@ -32,6 +32,9 @@ setup(
             'wsconnection = kirox_robot.ws_connection:main',
             'trainingnode = kirox_robot.trainingnode:main',
             'camera = kirox_robot.kirox_camera:main',
+            'camera_streaming = kirox_robot.camera_streaming:main',
+            'distance_detect = kirox_robot.distance_detect:main',
+            
         ],
     },
 )

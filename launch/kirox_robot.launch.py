@@ -22,12 +22,17 @@ def generate_launch_description():
         Node(package='kirox_robot', executable='robotears', name='robotears'),
         Node(package='kirox_robot', executable='robotmouth', name='robotmouth'),
         Node(package='kirox_robot', executable='wsconnection', name='wsconnection'),
-
+        Node(package='kirox_robot', executable='distance_detect', name='distance_detect'),
         Node(
             package='kirox_robot',
             executable='camera',
             name='camera',
             parameters=[{'device': LaunchConfiguration('video_device')}]
+        ),
+        Node(
+            package='kirox_robot',
+            executable='camera_streaming',
+            name='camera_streaming'
         ),
         Node(
             package='kirox_robot',

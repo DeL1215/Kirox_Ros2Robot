@@ -13,7 +13,7 @@ class RobotBodyNode(Node):
     """
     RobotBodyNode — ROS2 ↔ Arduino 雙向通訊節點
     - 訂閱主題 'body/action'：將指令轉發給 Arduino
-    - 監聽 Arduino 回傳資料並列印於 ROS2 log
+    - 監聽 Arduino 回傳資料並列印於 ROS2 log（對輸出做節流，避免刷屏）
     """
 
     def __init__(self):
@@ -42,6 +42,10 @@ class RobotBodyNode(Node):
 
         # 每 5 秒嘗試重新連線
         self.reconnect_timer = self.create_timer(5.0, self.connect_serial)
+
+        # 🔸 Arduino log 節流：最多每 3 秒印一條來自 Arduino 的訊息
+        self._last_arduino_log_time = 0.0
+        self._arduino_log_interval = 3.0
 
         # 背景執行緒：讀取 Arduino 回傳資料
         self.read_thread = threading.Thread(target=self.read_from_serial, daemon=True)
@@ -84,7 +88,7 @@ class RobotBodyNode(Node):
         if not command:
             return
 
-        # 🔸 新增明確 log 顯示收到的 ROS action
+        # 明確顯示收到的 ROS 指令
         self.get_logger().info(f"🎯 收到 ROS 指令: '{command}'")
 
         if self.serial_port and self.serial_port.is_open:
@@ -93,25 +97,34 @@ class RobotBodyNode(Node):
                 self.get_logger().info(f"➡️ 已發送到 Arduino: '{command}'")
             except serial.SerialException as e:
                 self.get_logger().error(f"❌ 寫入錯誤: {e}")
-                self.serial_port.close()
+                try:
+                    self.serial_port.close()
+                except Exception:
+                    pass
                 self.serial_port = None
         else:
             self.get_logger().warn("⚠️ 尚未連線 Arduino，指令未送出。")
 
     # -------------------------------------------------
-    # 讀取 Arduino → ROS2 資料
+    # 讀取 Arduino → ROS2 資料（有節流）
     # -------------------------------------------------
     def read_from_serial(self):
         """
-        持續讀取 Arduino 回傳資料，並在 ROS2 console 中印出。
+        持續讀取 Arduino 回傳資料：
+        - 功能：照樣每行都讀，不丟資料
+        - 但 log 只會「最多每 3 秒」印一次，避免超吵
         """
         while True:
             if self.serial_port and self.serial_port.is_open:
                 try:
                     line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        # 🔸 清楚顯示來自 Arduino 的訊息
-                        self.get_logger().info(f"📥 來自 Arduino: {line}")
+                        now = time.time()
+                        # 距離上次印 log 已超過 _arduino_log_interval 才印
+                        if now - self._last_arduino_log_time >= self._arduino_log_interval:
+                            self.get_logger().info(f"📥 來自 Arduino: {line}")
+                            self._last_arduino_log_time = now
+                        # 否則就安靜吃掉這行，不印 log（功能不受影響）
                 except serial.SerialException as e:
                     self.get_logger().error(f"❌ 讀取錯誤: {e}")
                     try:

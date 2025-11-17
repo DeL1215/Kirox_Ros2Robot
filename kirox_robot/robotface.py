@@ -72,29 +72,29 @@ ANIM_MAP: Dict[str, Dict[str, Any]] = {
     },
 
     # baseline / idle-eyes
-    "idle":         {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "insulted":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "surprised":    {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "praised":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "happy":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "sad":          {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "confused":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "angry":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "sleepy":       {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "excited":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "worried":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "curious":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "embarrassed":  {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "fearful":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "bored":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "nervous":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "disappointed": {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "relieved":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "proud":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "grateful":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "scared":       {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "shocked":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
-    "focused":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.7, "offset": (0, -60)},
+    "idle":         {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "insulted":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "surprised":    {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "praised":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "happy":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "sad":          {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "confused":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "angry":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "sleepy":       {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "excited":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "worried":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "curious":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "embarrassed":  {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "fearful":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "bored":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "nervous":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "disappointed": {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "relieved":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "proud":        {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "grateful":     {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "scared":       {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "shocked":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
+    "focused":      {"path": ASSETS_EYES / "Idle.gif", "speed": 1.0, "scale": 0.5, "offset": (0, -60)},
 }
 
 DEFAULT_ANIM = "empty"
@@ -439,8 +439,13 @@ class VirtualKeyboardDialog(GlassDialog):
 
 # ======================== 舞台（臉＋嘴） ========================
 class MovieCache:
+    """
+    只做 QMovie 的快取，不再動 setScaledSize。
+    真正的縮放都在 Stage._apply() 裡用 QPixmap.scaled() 處理。
+    """
     def __init__(self):
         self._cache: Dict[Path, QMovie] = {}
+
     def get(self, path: Path) -> QMovie:
         mv = self._cache.get(path)
         if mv is None:
@@ -451,11 +456,16 @@ class MovieCache:
 
 class Stage(QWidget):
     """
-    - stage_frame：置中的 16:9 黑底框，定義臉的參考框。
-    - bg_label / mouth_label：直接掛 Stage (整個視窗)，不會被 16:9 邊界裁切。
-    - 幾何計算用 stage_frame 的中心 + offset。
-    - z-order：stage_frame 最底, bg_label 中間, mouth_label 最上。
-    - frameChanged 時重新套 geometry，避免第一幀切頭。
+    - stage_frame：置中的 16:9 黑底框，當作幾何計算基準。
+    - bg_label / mouth_label 掛在 Stage 上，不被 16:9 邊界裁切。
+    - scale 定義：
+        scale=1.0 → 以「舞台高度」為基準，GIF 高度 = stage_h * 1.0
+        scale=0.7 → GIF 高度 = stage_h * 0.7
+      然後保持原始長寬比，如果寬度超過舞台寬度就整體縮小。
+    - 不使用 QMovie.setScaledSize、不把 movie 掛到 label，
+      而是每幀用 currentPixmap() → scaled() → setPixmap()。
+    - ❗ 每次 set_background / set_mouth 都建立新的 QMovie，
+      不共用實例，避免內部狀態汙染導致之後比例跑掉。
     """
 
     def __init__(self, aspect_w=16, aspect_h=9):
@@ -474,22 +484,22 @@ class Stage(QWidget):
         sp.setColor(QPalette.Window, QColor(0, 0, 0))
         self.stage_frame.setPalette(sp)
 
-        # 臉(眼睛)動畫
+        # 臉(眼睛)動畫 label
         self.bg_label = QLabel(self)
         self.bg_label.setAlignment(Qt.AlignCenter)
         self.bg_label.setStyleSheet("background: transparent;")
+        self.bg_label.setScaledContents(False)  # 我們手動決定大小
 
-        # 嘴巴層
+        # 嘴巴 label（你的嘴型是 PNG，另外在 RobotFaceNode 裡自己算）
         self.mouth_label = QLabel(self)
         self.mouth_label.setAlignment(Qt.AlignCenter)
         self.mouth_label.setStyleSheet("background: transparent;")
+        self.mouth_label.setScaledContents(False)
 
         # 疊層
         self.stage_frame.lower()
         self.bg_label.raise_()
         self.mouth_label.raise_()
-
-        self._movie_cache = MovieCache()
 
         self._bg_spec: Optional[LayerSpec] = None
         self._mouth_spec: Optional[LayerSpec] = None
@@ -501,9 +511,11 @@ class Stage(QWidget):
 
         self._stage_rect = QRect(0, 0, 0, 0)
 
+    # ---------- 視窗 / 16:9 佈局 ----------
+
     def resizeEvent(self, _):
         self._layout_16_9()
-        # 視窗大小改變時，再套一次正確幾何
+        # 視窗大小改變時，再套一次幾何
         if self._bg_movie and self._bg_spec:
             self._apply(self.bg_label, self._bg_spec, self._bg_movie)
         if self._mouth_movie and self._mouth_spec:
@@ -516,21 +528,24 @@ class Stage(QWidget):
         if th > wh:
             th = wh
             tw = int(wh * self.aspect_w / self.aspect_h)
-        x, y = (ww - tw) // 2, (wh - th) // 2
+        x = (ww - tw) // 2
+        y = (wh - th) // 2
 
         self._stage_rect = QRect(x, y, tw, th)
         self.stage_frame.setGeometry(self._stage_rect)
 
+    # ---------- 綁定 QMovie，每幀更新幾何（大小自己算） ----------
+
     def _bind_movie_and_apply(self, label: QLabel, spec: LayerSpec, mv: QMovie, which: str):
-        # 先做一次（可能此刻 frameRect 還沒正確，但等下一幀會再 apply）
+        # 先試做一次（如果 currentPixmap 還是空的就等下一幀）
         self._apply(label, spec, mv)
 
         def on_frame_changed(_frame_index: int):
             self._apply(label, spec, mv)
 
-        # 清掉舊的signal，避免重複
+        # 清掉舊的連線
         if which == "bg":
-            if self._bg_conn is not None:
+            if self._bg_conn is not None and self._bg_movie is not None:
                 try:
                     self._bg_movie.frameChanged.disconnect(self._bg_conn)
                 except Exception:
@@ -538,13 +553,15 @@ class Stage(QWidget):
             mv.frameChanged.connect(on_frame_changed)
             self._bg_conn = on_frame_changed
         else:
-            if self._mouth_conn is not None:
+            if self._mouth_conn is not None and self._mouth_movie is not None:
                 try:
                     self._mouth_movie.frameChanged.disconnect(self._mouth_conn)
                 except Exception:
                     pass
             mv.frameChanged.connect(on_frame_changed)
             self._mouth_conn = on_frame_changed
+
+    # ---------- 設定背景動畫 ----------
 
     def set_background(self, spec: Optional[LayerSpec]):
         # 停掉舊動畫
@@ -563,17 +580,20 @@ class Stage(QWidget):
         if not spec or not spec.path or not spec.path.exists():
             return
 
-        mv = self._movie_cache.get(spec.path)
-        mv.stop()
+        # ❗ 每次都新建一個 QMovie，避免共用實例導致比例亂變
+        mv = QMovie(str(spec.path))
+        mv.setCacheMode(QMovie.CacheAll)
         mv.setSpeed(int(max(0.1, float(spec.speed)) * 100))
-        self.bg_label.setMovie(mv)
+
         self._bg_movie = mv
         mv.start()
 
+        # 不用 setMovie，只靠 frameChanged + currentPixmap
         self._bind_movie_and_apply(self.bg_label, spec, mv, which="bg")
 
+    # ---------- 設定嘴巴動畫（如果未來有嘴巴 GIF） ----------
+
     def set_mouth(self, spec: Optional[LayerSpec], play: bool):
-        # 停掉舊動畫
         if self._mouth_movie:
             if self._mouth_conn is not None:
                 try:
@@ -589,51 +609,75 @@ class Stage(QWidget):
         if not play or not spec or not spec.path or not spec.path.exists():
             return
 
-        mv = self._movie_cache.get(spec.path)
-        mv.stop()
+        mv = QMovie(str(spec.path))
+        mv.setCacheMode(QMovie.CacheAll)
         mv.setSpeed(int(max(0.1, float(spec.speed)) * 100))
-        self.mouth_label.setMovie(mv)
+
         self._mouth_movie = mv
         mv.start()
 
         self._bind_movie_and_apply(self.mouth_label, spec, mv, which="mouth")
 
+    # ---------- 核心：用 movie.frameRect + scale 算出目標尺寸，維持長寬比 ----------
+
     def _apply(self, label: QLabel, spec: Optional[LayerSpec], mv: Optional[QMovie]):
         if not spec or not mv:
             return
+
         if self._stage_rect.width() < 10 or self._stage_rect.height() < 10:
             return
-
-        # GIF 原始尺寸
-        original_movie_size = mv.frameRect().size()
-        if original_movie_size.isEmpty():
-            original_movie_size = mv.currentPixmap().size()
-        if original_movie_size.isEmpty():
-            return  # 等下一幀
 
         stage_w = self._stage_rect.width()
         stage_h = self._stage_rect.height()
 
+        # 取目前這一幀圖像
+        pix = mv.currentPixmap()
+        if pix.isNull():
+            return  # 檔案還沒 decode 完，等下一幀
+
+        # 用 movie 的 frameRect 當「邏輯尺寸」，避免某些幀被裁切導致比例亂變
+        fr = mv.frameRect()
+        base_w = fr.width() or pix.width() or 1
+        base_h = fr.height() or pix.height() or 1
+        base_w = max(1, base_w)
+        base_h = max(1, base_h)
+        aspect = base_w / base_h
+
+        # scale 針對「舞台高度」
         if spec.scale is not None:
-            box_w = int(stage_w * spec.scale)
-            box_h = int(stage_h * spec.scale)
-            bounding_box_for_scaling = QSize(box_w, box_h)
+            target_h = int(stage_h * float(spec.scale))
         else:
-            bounding_box_for_scaling = QSize(stage_w, stage_h)
+            target_h = stage_h
 
-        target_scaled_size = original_movie_size.scaled(
-            bounding_box_for_scaling,
-            Qt.KeepAspectRatio
+        if target_h <= 0:
+            target_h = stage_h
+
+        target_w = int(target_h * aspect)
+
+        # 如果寬度超過舞台，就整體縮小到塞進舞台
+        if target_w > stage_w:
+            factor = stage_w / float(target_w)
+            target_w = int(target_w * factor)
+            target_h = int(target_h * factor)
+
+        target_w = max(1, target_w)
+        target_h = max(1, target_h)
+
+        # 實際縮放這一幀
+        scaled = pix.scaled(
+            target_w, target_h,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
         )
+        label.setPixmap(scaled)
+        label.setScaledContents(False)
 
-        w = target_scaled_size.width()
-        h = target_scaled_size.height()
-
-        mv.setScaledSize(QSize(w, h))
-
+        # 幾何：舞台中心 + offset
         stage_cx = self._stage_rect.x() + stage_w // 2
         stage_cy = self._stage_rect.y() + stage_h // 2
 
+        w = scaled.width()
+        h = scaled.height()
         x = stage_cx - (w // 2) + spec.offset[0]
         y = stage_cy - (h // 2) + spec.offset[1]
 
