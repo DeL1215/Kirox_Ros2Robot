@@ -101,7 +101,7 @@ class DistanceDetectNode(Node):
 
         
         # 參數：可在 launch / CLI 覆寫
-        self.declare_parameter('port', '/dev/ttyCH341USB0')
+        self.declare_parameter('port', '/dev/ttyCH341USB1')
         self.declare_parameter('baud', 921600)
 
         self.port_param = self.get_parameter('port').get_parameter_value().string_value
@@ -125,7 +125,7 @@ class DistanceDetectNode(Node):
 
         self.get_logger().info('distance_detect 節點啟動中...')
         self._serial_thread.start()
-        self.isdebug = True
+        self.isdebug = False
 
     # ----- ROS2 Timer：定期發佈 -----
 

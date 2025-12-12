@@ -22,7 +22,7 @@ def generate_launch_description():
         Node(package='kirox_robot', executable='robotears', name='robotears'),
         Node(package='kirox_robot', executable='robotmouth', name='robotmouth'),
         Node(package='kirox_robot', executable='wsconnection', name='wsconnection'),
-        Node(package='kirox_robot', executable='distance_detect', name='distance_detect'),
+        # Node(package='kirox_robot', executable='distance_detect', name='distance_detect'),
         Node(
             package='kirox_robot',
             executable='camera',

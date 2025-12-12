@@ -100,7 +100,7 @@ class RobotEarsNode(Node):
         self.declare_parameter("start_prob", 0.48)   # 比 Conservative 再柔和一點
         self.declare_parameter("end_prob", 0.8)
         self.declare_parameter("k_start", 3)
-        self.declare_parameter("k_end", 9)
+        self.declare_parameter("k_end", 18)
         self.declare_parameter("t_cap_s", 3.0)
         self.declare_parameter("p_min", 0.52)        # 平均語音機率中等門檻
         self.declare_parameter("snr_min_db", 5.0)
